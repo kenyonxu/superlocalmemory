@@ -10,7 +10,9 @@ Linux) test runner too.
 
 from __future__ import annotations
 
+import os
 import platform
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -27,21 +29,51 @@ pytestmark = pytest.mark.skipif(
 
 
 def _fake_bin(tmp_path: Path, name: str, script: str) -> Path:
-    """Write an executable fake binary named `name` into a fresh dir on PATH."""
+    """Write an executable fake binary named `name` into a fresh dir on PATH.
+
+    The shebang pins bash by absolute path: under the hermetic PATH (see
+    ``_hermetic_path``) there is no ``env``-visible bash to resolve.
+    """
     bindir = tmp_path / "fakebin"
     bindir.mkdir(exist_ok=True)
     target = bindir / name
-    target.write_text(f"#!/usr/bin/env bash\n{script}\n")
+    bash = shutil.which("bash") or "/bin/bash"
+    target.write_text(f"#!{bash}\n{script}\n")
     target.chmod(target.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return bindir
 
 
+def _hermetic_path(tmp_path: Path, fake: Path | None) -> str:
+    """A PATH with no host binaries on it: the test's fakes plus the one
+    external torch-cpu-resolve.sh needs (``grep``).
+
+    The gate host — like any CI box with a driver present but no usable GPU —
+    carries ``/usr/bin/nvidia-smi``, and ``/bin`` is usrmerged into
+    ``/usr/bin``, so every PATH through the system dirs breaks the "a Linux
+    box with no GPU" premise of the tests that need it (gate §2.2's
+    environmental cluster). A hermetic PATH makes that premise true on every
+    host; the assertions themselves are unchanged.
+    """
+    tools = tmp_path / "hermetic-bin"
+    tools.mkdir(exist_ok=True)
+    grep = shutil.which("grep") or "/usr/bin/grep"
+    if not (tools / "grep").exists():
+        os.symlink(grep, tools / "grep")
+    parts = [str(fake)] if fake is not None else []
+    parts.append(str(tools))
+    return ":".join(parts)
+
+
 def _run(tmp_path: Path, body: str, env_overrides: dict[str, str] | None = None,
-          path_prefix: Path | None = None) -> subprocess.CompletedProcess:
+          path_prefix: Path | None = None, *, hermetic: bool = False) -> subprocess.CompletedProcess:
     """Source torch-cpu-resolve.sh then run `body`, with a clean, controlled env."""
+    if hermetic:
+        path = _hermetic_path(tmp_path, path_prefix)
+    else:
+        path = (f"{path_prefix}:" if path_prefix else "") + "/usr/bin:/bin"
     env = {
         "HOME": str(tmp_path),
-        "PATH": (f"{path_prefix}:" if path_prefix else "") + "/usr/bin:/bin",
+        "PATH": path,
     }
     if env_overrides:
         env.update(env_overrides)
@@ -49,9 +81,10 @@ def _run(tmp_path: Path, body: str, env_overrides: dict[str, str] | None = None,
     # torch_cpu_pin directly (not inside an `if`), and both return 1 as a
     # normal, expected signal — `set -e` would abort the harness on that
     # return the way it never does inside ensure-venv.sh's own `if` guards.
+    # bash by absolute path: a hermetic PATH has no system dirs on it.
     script = f'set -uo pipefail\n. "{RESOLVE_SH}"\n{body}\n'
     return subprocess.run(
-        ["bash", "-c", script],
+        [shutil.which("bash") or "/bin/bash", "-c", script],
         env=env,
         capture_output=True,
         text=True,
@@ -76,8 +109,10 @@ def test_non_linux_never_forces(tmp_path):
 
 
 def test_linux_no_gpu_no_override_forces_cpu(tmp_path):
+    # Hermetic PATH (gate §2.2): the host's /usr/bin/nvidia-smi — a driver
+    # present with no usable GPU — must not leak into this "no GPU" premise.
     fake = _fake_bin(tmp_path, "uname", 'echo "Linux"')
-    result = _run(tmp_path, "torch_cpu_should_force", path_prefix=fake)
+    result = _run(tmp_path, "torch_cpu_should_force", path_prefix=fake, hermetic=True)
     assert result.returncode == 0, (result.stdout, result.stderr)
 
 
@@ -194,7 +229,7 @@ def test_ensure_venv_pip_invocation_uses_cpu_index_on_forced_linux(tmp_path):
         "fi\n"
     )
     fake = _fake_bin(tmp_path, "uname", 'echo "Linux"')
-    result = _run(tmp_path, body, path_prefix=fake)
+    result = _run(tmp_path, body, path_prefix=fake, hermetic=True)
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "would run: pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0" in result.stdout
     assert "nvidia" not in result.stdout

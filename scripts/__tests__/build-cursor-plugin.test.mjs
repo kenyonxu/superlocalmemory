@@ -59,8 +59,8 @@ describe('Cursor MCP definition', () => {
 
   test('is a PATH command pinned to the release being built', () => {
     assert.equal(server.command, 'uvx');
-    assert.deepEqual(server.args, ['--from', 'superlocalmemory==9.8.7', 'slm', 'mcp']);
-    assert.equal(packagePin(MANIFEST), 'superlocalmemory==9.8.7');
+    assert.deepEqual(server.args, ['--from', 'mslm-memory==9.8.7', 'slm', 'mcp']);
+    assert.equal(packagePin(MANIFEST), 'mslm-memory==9.8.7');
   });
 
   test('contains no ${...} placeholder in command, args or env', () => {

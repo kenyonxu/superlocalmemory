@@ -191,8 +191,9 @@ function runtimePythonPath(packageRoot, platform = os.platform()) {
  * Single source of truth for the Python payload (4.1.14 #134, Option A).
  *
  * The npm tarball carries NO Python sources. The package-owned venv is
- * populated from the pinned PyPI wheel `superlocalmemory==<npm version>`,
- * so there is exactly one copy of the package and patching any other
+ * populated from the pinned PyPI wheel `mslm-memory==<npm version>` (the
+ * fork's PyPI distribution — this npm package IS mslm-memory), so there is
+ * exactly one copy of the package and patching any other
  * tree cannot shadow it. `SLM_LOCAL_WHEEL=/path/to/file.whl` overrides
  * the specifier for air-gapped installs: it must be an existing local
  * `.whl` file (directories, sdists and URLs are refused) and it still
@@ -225,7 +226,10 @@ function pypiSpecifier(packageRoot) {
     return localWheel;
   }
   const packageVersion = require(path.join(packageRoot, 'package.json')).version;
-  return `superlocalmemory==${packageVersion}`;
+  // Fork identity (merge 4.2.6, S3 completion): the wheel pip installs is
+  // the fork's mslm-memory distribution — the upstream superlocalmemory
+  // wheel would be a different product at the same version.
+  return `mslm-memory==${packageVersion}`;
 }
 
 function validateRuntimeLocation(venvRoot) {
@@ -473,7 +477,7 @@ function main(argv = process.argv.slice(2)) {
   }
 
   console.log(`SuperLocalMemory ${packageVersion}: isolated runtime verified.`);
-  console.log(`Single source of truth for this npm installation: the PyPI wheel superlocalmemory==${packageVersion} in .slm-venv;`);
+  console.log(`Single source of truth for this npm installation: the PyPI wheel mslm-memory==${packageVersion} in .slm-venv;`);
   console.log('the npm tarball carries no Python sources, so no second copy can shadow it.');
   console.log('(The Claude Code plugin keeps its own separate pinned runtime for its host;');
   console.log(' that scope is independent of this npm installation — see plugin/requirements.txt.)');

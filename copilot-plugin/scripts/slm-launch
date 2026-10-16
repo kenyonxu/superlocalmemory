@@ -97,8 +97,10 @@ _ensure_daemon() {
 }
 
 # The release this plugin tree ships (requirements.txt is stamped every release).
+# Fork identity: the PyPI distribution is mslm-memory (same engine, fork package
+# name), so that is the pin uvx resolves — consistent with requirements.txt.
 _slm_pin() {
-    sed -n 's/^\(superlocalmemory==[0-9][0-9A-Za-z.+!-]*\)[[:space:]]*$/\1/p' \
+    sed -n 's/^\(mslm-memory==[0-9][0-9A-Za-z.+!-]*\)[[:space:]]*$/\1/p' \
         "${_SLM_PLUGIN_ROOT}/requirements.txt" 2>/dev/null | head -n 1
 }
 
@@ -109,7 +111,7 @@ _slm_run_uvx() {
     command -v uvx >/dev/null 2>&1 || return 1
     _pin="$(_slm_pin)"
     if [ -z "${_pin}" ]; then
-        echo "SLM plugin: not using uvx: no superlocalmemory pin in ${_SLM_PLUGIN_ROOT}/requirements.txt." >&2
+        echo "SLM plugin: not using uvx: no mslm-memory pin in ${_SLM_PLUGIN_ROOT}/requirements.txt." >&2
         return 1
     fi
     # PyPI's Linux torch is the CUDA build; macOS and Windows get CPU wheels anyway.

@@ -33,7 +33,10 @@ for (const name of ['plugin.yaml', 'README.md', '__init__.py', 'remote.py', 'com
 // Stamped here too, from the same pyproject.toml version, so both the
 // package and its install docs move together.
 const stampHermesDocVersion = (text) => text
-  .replace(/superlocalmemory==\d+\.\d+\.\d+/g, `superlocalmemory==${VERSION.join('.')}`)
+  // Fork identity (merge 4.2.6, S3 completion): the install pin is the
+  // fork's mslm-memory wheel; a legacy superlocalmemory== pin in an
+  // already-stamped doc is rewritten to it on the next build.
+  .replace(/(mslm-memory|superlocalmemory)==\d+\.\d+\.\d+/g, `mslm-memory==${VERSION.join('.')}`)
   .replace(/`v\d+\.\d+\.\d+`/g, `\`v${VERSION.join('.')}\``)
   .replace(/download\/v\d+\.\d+\.\d+\//g, `download/v${VERSION.join('.')}/`)
   .replace(/SuperLocalMemory \d+\.\d+\.\d+ ships/g, `SuperLocalMemory ${VERSION.join('.')} ships`);

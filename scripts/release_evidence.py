@@ -259,8 +259,8 @@ def verify_python_source_parity(
     4.1.14 single-source contract (#134): the npm tarball is NOT a
     Python source holder, so parity is wheel-vs-sdist only. The npm
     archive participates through VERSION agreement instead — the venv
-    installs ``superlocalmemory==<npm version>``, so a skewed pair
-    (npm X, wheel Y) must fail the gate rather than ship.
+    installs ``mslm-memory==<npm version>`` (the fork's PyPI wheel), so a
+    skewed pair (npm X, wheel Y) must fail the gate rather than ship.
     """
     try:
         sources = {

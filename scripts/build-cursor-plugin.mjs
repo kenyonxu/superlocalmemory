@@ -100,9 +100,13 @@ function sortedJson(obj) {
   return JSON.stringify(sort(obj), null, 2) + '\n';
 }
 
-/** The package spec uvx installs: always this release, never "latest". */
+/** The package spec uvx installs: always this release, never "latest".
+ * Fork identity (merge 4.2.6, S3 completion): the PyPI distribution this
+ * plugin pins is mslm-memory — the same engine under the fork's package
+ * name, consistent with plugin/requirements.txt. The MCP server name and
+ * the `slm` command it runs are unchanged. */
 export function packagePin(manifest) {
-  return `superlocalmemory==${manifest.version}`;
+  return `mslm-memory==${manifest.version}`;
 }
 
 export function renderCursorMcpJson(manifest) {

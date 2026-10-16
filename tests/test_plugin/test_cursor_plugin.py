@@ -43,7 +43,9 @@ def _server() -> dict:
 def test_the_uvx_pin_is_the_package_version() -> None:
     server = _server()
     assert server["command"] == "uvx"
-    assert server["args"] == ["--from", f"superlocalmemory=={_package_version()}", "slm", "mcp"]
+    # Fork identity (merge 4.2.6, S3 completion): the pinned PyPI
+    # distribution is mslm-memory; the `slm` command it runs is unchanged.
+    assert server["args"] == ["--from", f"mslm-memory=={_package_version()}", "slm", "mcp"]
 
 
 def test_manifest_and_marketplace_carry_the_package_version() -> None:

@@ -13,7 +13,7 @@ tools:
 # slm-getting-started-bot — First Session on a Headless Bot Host
 
 You are talking to SuperLocalMemory through its MCP server, started as
-`uvx --from superlocalmemory==<version> slm mcp` by the plugin manifest. This
+`uvx --from mslm-memory==<version> slm mcp` by the plugin manifest. This
 skill is for the ways that is different from a Claude Code or Codex install —
 read it once per new host, not once per session.
 

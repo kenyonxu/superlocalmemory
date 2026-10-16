@@ -6,7 +6,7 @@ not a replacement for, Hermes's built-in memory provider and configuration.
 Install the owning runtime first:
 
 ```bash
-python -m pip install --upgrade superlocalmemory==4.2.6
+python -m pip install --upgrade mslm-memory==4.2.6
 slm doctor
 ```
 

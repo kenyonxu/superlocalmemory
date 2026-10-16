@@ -42,7 +42,9 @@ test('docs/hermes.md states the current pyproject version, not a stale pin', () 
   const version = readVersion();
   const text = fs.readFileSync(DOCS_HERMES, 'utf8');
   assert.match(text, new RegExp(`SuperLocalMemory ${version.replace(/\./g, '\\.')} ships`));
-  assert.match(text, new RegExp(`superlocalmemory==${version.replace(/\./g, '\\.')}`));
+  // Fork identity (merge 4.2.6, S3 completion): the stamped install pin is
+  // the fork's mslm-memory wheel.
+  assert.match(text, new RegExp(`mslm-memory==${version.replace(/\./g, '\\.')}`));
   assert.match(text, new RegExp('`v' + version.replace(/\./g, '\\.') + '`'));
   assert.match(text, new RegExp(`download/v${version.replace(/\./g, '\\.')}/`));
 });

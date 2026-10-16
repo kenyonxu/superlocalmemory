@@ -136,8 +136,8 @@ test('postinstall installs the pinned PyPI wheel, never the bundled tree (#134)'
   const installArg = pipCalls[0].args[pipCalls[0].args.length - 1];
   assert.equal(
     installArg,
-    `superlocalmemory==${PACKAGE_VERSION}`,
-    'the venv must be populated from the pinned PyPI wheel (single source of truth)',
+    `mslm-memory==${PACKAGE_VERSION}`,
+    'the venv must be populated from the pinned fork PyPI wheel (single source of truth)',
   );
   assert.doesNotMatch(
     pipCalls[0].args.join(' '),
