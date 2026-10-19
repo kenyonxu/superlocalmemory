@@ -22,7 +22,7 @@ evidence floor off) and:
      recipe block to paste into support_recipe.py.
 
     python scripts/quality/answerability_fit.py --rows rows.jsonl [--profile a]
-        [--out fit.json]
+        [--out fit.json] [--gate] [--corpus {en,cjk}]
 
 Synthetic data only. Needs numpy and scipy (development tools, not the product).
 Exit codes: 0 fitted (gate holds on held-out) · 1 fitted, gate does not hold · 2 bad input.
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import sys
@@ -348,15 +349,24 @@ def gate_table(rows: list[dict], slice_of: dict[str, str]) -> dict:
     return out
 
 
-def _gate_report(rows: list[dict]) -> dict:
-    import importlib.util
+#: Corpus selector, mirroring answerability_eval.py: the EN module the
+#: recorded baselines name, and its Chinese twin for CJK gate-measuring.
+_CORPUS_MODULES = {"en": "answerability_corpus", "cjk": "answerability_corpus_cjk"}
 
-    spec = importlib.util.spec_from_file_location(
-        "answerability_corpus", _HERE / "answerability_corpus.py")
-    corpus = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("answerability_corpus", corpus)
-    spec.loader.exec_module(corpus)
-    slice_of = corpus.slice_of_key()
+
+def _load_corpus_module(corpus: str = "en"):
+    name = _CORPUS_MODULES[corpus]
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, _HERE / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _gate_report(rows: list[dict], corpus: str = "en") -> dict:
+    slice_of = _load_corpus_module(corpus).slice_of_key()
     dev = [r for r in rows if not is_fresh(r)]
     fresh = [r for r in rows if is_fresh(r)]
     _, held = split(dev)
@@ -373,6 +383,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out")
     p.add_argument("--gate", action="store_true",
                    help="report what recall did (the gate pass) on the held-out split")
+    p.add_argument("--corpus", choices=sorted(_CORPUS_MODULES), default="en",
+                   help="which corpus module maps keys to slices for --gate "
+                        "(en: answerability_corpus, cjk: its Chinese twin)")
     p.add_argument("--baseline", help="rows of recall as shipped before (defines 'today')")
     args = p.parse_args(argv)
     _bootstrap()
@@ -394,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
             if r.get("profile", args.profile) == args.profile and r["set"] == "real"}
         rows = [{**r, "today": today[r["qid"]]} if r["qid"] in today else r for r in rows]
     if args.gate:
-        print(json.dumps(_gate_report(rows), indent=2))
+        print(json.dumps(_gate_report(rows, args.corpus), indent=2))
         return 0
     # The frozen test half is never fitted, never used for the threshold and
     # never scored here: run recall with the recipe and use --gate for it.

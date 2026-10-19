@@ -65,3 +65,26 @@ def test_gate_table_reads_what_recall_did_per_slice() -> None:
     assert table["legacy"]["nonsense_abstain"] == "1/1"  # the stub is not legacy
     assert table["described"]["nonsense_answered"] == ["n1"]
     assert table["all"]["unanswerable_abstain"] == "1/1"
+
+
+def test_gate_report_maps_slices_with_the_chosen_corpus() -> None:
+    fit = _fit()
+    assert fit._load_corpus_module("en").CORPUS_VERSION == "answerability-corpus-v2"
+    cjk = fit._load_corpus_module("cjk")
+    assert cjk.CORPUS_VERSION == "answerability-corpus-cjk-v1"
+    # a key only the CJK map knows (the shared filler rows -- receipts, logs,
+    # stubs -- carry the same keys in both corpora, so pick a cjk- anchor);
+    # the EN default does not
+    cjk_keys = cjk.slice_of_key()
+    key = next(k for k, sl in cjk_keys.items()
+               if sl == "described" and k.startswith("cjk-"))
+    rows = [
+        {"qid": "r1", "set": "real", "category": "name", "rank": 1,
+         "abstained": False, "result_keys": [key]},
+        {"qid": "n1", "set": "nonsense", "category": "letters", "rank": None,
+         "abstained": False, "result_keys": [key]},
+        {"qid": "u1", "set": "unanswerable", "category": "audit", "rank": None,
+         "abstained": True, "result_keys": []},
+    ]
+    assert fit._gate_report(rows, "cjk")["dev_all"]["described"]["nonsense_abstain"] == "0/1"
+    assert fit._gate_report(rows, "en")["dev_all"]["described"]["nonsense_abstain"] == "1/1"

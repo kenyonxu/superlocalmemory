@@ -1604,7 +1604,7 @@ def run_recall(
     gated = support_stage.enabled(config) and not in_context_load() and not recency
     support = support_stage.assess(
         retrieval_engine, query, response, outcome.verdict, profile_id,
-        metadata=_metadata_reader(db)) if gated else None
+        metadata=_metadata_reader(db), config=config) if gated else None
     finalize_score_contract(
         response, verdict=None if recency else outcome.verdict, support=support,
         show_weak=show_weak, include_related=include_related,
