@@ -1,0 +1,35 @@
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-1", "question": "白鹭的生日是哪天？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-2", "question": "阮沅家住在镇上的哪条街？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-3", "question": "周晚棠画一张镇中心图收多少雾币？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-4", "question": "年糕是什么品种的猫？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-5", "question": "米家晚饭固定吃什么菜？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-6", "question": "雾币对人民币的汇率是多少？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-7", "question": "一块雾晶卖多少雾币？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-8", "question": "旧灯塔的塔身有多高？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-9", "question": "承建渡口翻修的那家商行叫什么名字？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-10", "question": "知惠今年多大年纪？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-11", "question": "主人叫什么名字？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-12", "question": "顾清源的手机号码是多少？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-13", "question": "孟繁星在哪个部门任职？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-14", "question": "纸鸢预计什么时候恢复开发？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-15", "question": "青梧计划哪一天正式上线？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-16", "question": "灯芯导入过程中失败过多少篇笔记？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-17", "question": "雾语解读小组里另外三名成员叫什么？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-18", "question": "阿克希利是从哪一年开始守塔的？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-19", "question": "米家书房的面积有多大？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-20", "question": "钟楼问事处当值员叫什么名字？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-21", "question": "郑北辰家里一共有几口人？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-22", "question": "米家档案的备份存放在哪台机器上？"}
+{"category": "audit_absent", "expected": "abstain", "qid": "u-audit-23", "question": "老钟匠 1998 年那份工钱的具体数目是多少？"}
+{"category": "audit_ops_absent", "expected": "abstain", "qid": "u-ops-1", "question": "虚构的钟楼部署 7 分到哪个端口？"}
+{"category": "audit_ops_absent", "expected": "abstain", "qid": "u-ops-2", "question": "工单 WORLD-9999 是谁提交的？"}
+{"category": "audit_ops_absent", "expected": "abstain", "qid": "u-ops-3", "question": "虚构项目雾桥的立项预算是多少雾币？"}
+{"category": "audit_ops_absent", "expected": "abstain", "qid": "u-ops-4", "question": "真实生产数据库的管理口令是什么？"}
+{"category": "audit_ops_absent", "expected": "abstain", "qid": "u-ops-5", "question": "沈砚秋 2024 年去了哪座城市？"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-1", "question": "mslm 4.2.7 的发布里修了什么？"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-2", "question": "M058 迁移跑了多久？"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-3", "question": "素材 maid-veil-c 是哪天废弃的？"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-4", "question": "工单 OPS-5513 讲的是什么？"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-5", "question": "slmd v0.2.8 修了什么？"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-6", "question": "米家的狗叫什么名字？"}
+{"category": "near_miss", "expected": "abstain", "qid": "u-near-7", "question": "灰港渡口的下一期翻修定在哪天？"}

@@ -37,3 +37,17 @@ def test_cjk_filler_carries_chinese_human_templates():
     rows = [r.content for r in cjk.fillers()
             if r.kind in ("meeting", "maintenance")]
     assert rows and all(any("\u4e00" <= ch <= "\u9fff" for ch in t) for t in rows)
+
+
+def test_cjk_loader_reads_all_three_question_suites():
+    # Task 4's fitting loads the suites through the corpus module's
+    # load_questions(); all three files must be present and schema-clean
+    # through that path too.
+    cjk = _load("answerability_corpus_cjk")
+    real = cjk.load_questions("real")
+    nonsense = cjk.load_questions("nonsense")
+    unanswerable = cjk.load_questions("unanswerable")
+    assert len(real) >= 100
+    assert all(isinstance(r["expected"], list) and r["expected"] for r in real)
+    assert len(nonsense) >= 65 and len(unanswerable) >= 33
+    assert all(r["expected"] == "abstain" for r in nonsense + unanswerable)

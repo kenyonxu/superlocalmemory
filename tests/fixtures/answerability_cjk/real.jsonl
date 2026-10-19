@@ -1,0 +1,116 @@
+{"category": "code_identifier", "expected": ["cjk-code-reconnect-backoff"], "qid": "r-code-1", "question": "重连退避 reconnect_backoff() 的上限是多少秒？"}
+{"category": "code_identifier", "expected": ["cjk-code-daemon-wait"], "qid": "r-code-2", "question": "wait_for_socket() 最多等多少秒再拉起第二个守护？"}
+{"category": "code_identifier", "expected": ["cjk-code-journal-size"], "qid": "r-code-3", "question": "journald.conf 里的 SystemMaxUse 设成了多少？"}
+{"category": "code_identifier", "expected": ["cjk-code-timer-calendar"], "qid": "r-code-4", "question": "备份的 systemd timer 定在每天几点触发？"}
+{"category": "code_identifier", "expected": ["cjk-code-socket-activation"], "qid": "r-code-5", "question": "摄取守护靠什么机制做到第一条连接到来前不占内存？"}
+{"category": "code_identifier", "expected": ["cjk-code-parse-window"], "qid": "r-code-6", "question": "parse_cn_window() 读不懂时间表达式时返回什么？"}
+{"category": "code_identifier", "expected": ["cjk-code-trigram"], "qid": "r-code-7", "question": "中文检索的主分词路径用几元 n-gram？"}
+{"category": "code_identifier", "expected": ["cjk-code-busy-timeout"], "qid": "r-code-8", "question": "每条 SQLite 连接的 busy_timeout 设了多少毫秒？"}
+{"category": "code_identifier", "expected": ["cjk-code-migration-runner"], "qid": "r-code-9", "question": "迁移执行器放在哪个模块文件里？"}
+{"category": "code_identifier", "expected": ["cjk-code-dedup-flag"], "qid": "r-code-10", "question": "SLM_INGEST_NO_DEDUP 只应该在什么场景下打开？"}
+{"category": "code_identifier", "expected": ["cjk-code-recall-limit"], "qid": "r-code-11", "question": "MCP 工具层把超过多少条的召回请求一律截断？"}
+{"category": "code_identifier", "expected": ["cjk-code-fts-jieba"], "qid": "r-code-12", "question": "原子记忆的 FTS5 表用哪个分词器建索引？"}
+{"category": "bare_identifier", "expected": ["cjk-code-reconnect-backoff"], "qid": "r-bare-1", "question": "reconnect_backoff"}
+{"category": "bare_identifier", "expected": ["cjk-code-parse-window"], "qid": "r-bare-2", "question": "parse_cn_window"}
+{"category": "bare_identifier", "expected": ["cjk-id-ticket-ops5512"], "qid": "r-bare-3", "question": "OPS-5512"}
+{"category": "bare_identifier", "expected": ["cjk-ver-slmd-027"], "qid": "r-bare-4", "question": "v0.2.7"}
+{"category": "version", "expected": ["cjk-ver-426"], "qid": "r-ver-1", "question": "mslm 4.2.6 的发布里上线了什么门？"}
+{"category": "version", "expected": ["cjk-ver-425"], "qid": "r-ver-2", "question": "mslm 4.2.5 这个窄发布一共改了几处？"}
+{"category": "version", "expected": ["cjk-ver-m3d-baseline"], "qid": "r-ver-3", "question": "M3d 基线从哪个版本起固定、定在多少？"}
+{"category": "version", "expected": ["cjk-ver-node22"], "qid": "r-ver-4", "question": "MCP 一致性测试台需要哪个 Node 版本？"}
+{"category": "version", "expected": ["cjk-ver-python313"], "qid": "r-ver-5", "question": "Python 3.13 从哪个版本起受支持？"}
+{"category": "version", "expected": ["cjk-ver-slmd-027"], "qid": "r-ver-6", "question": "slmd v0.2.7 修了哪一处 unix socket 权限位？"}
+{"category": "acronym", "expected": ["cjk-acr-rrf"], "qid": "r-acr-1", "question": "RRF 融合里的 k 取多少？"}
+{"category": "acronym", "expected": ["cjk-acr-fsrs"], "qid": "r-acr-2", "question": "FSRS 的复习间隔最长能拉到几天？"}
+{"category": "acronym", "expected": ["cjk-acr-csls"], "qid": "r-acr-3", "question": "CSLS 减去的分别是哪个量？"}
+{"category": "acronym", "expected": ["cjk-acr-sla"], "qid": "r-acr-4", "question": "SLA 对 P1 事件的响应时限是几小时？"}
+{"category": "acronym", "expected": ["cjk-acr-mrr"], "qid": "r-acr-5", "question": "MRR 指标是怎么计算的？"}
+{"category": "acronym", "expected": ["cjk-acr-sla"], "qid": "r-acr-6", "question": "托管网关承诺的月度可用率是多少？"}
+{"category": "exact_id", "expected": ["cjk-id-receipt-sandbox"], "qid": "r-id-1", "question": "asdk_app_7c3f5a19d4e20b68"}
+{"category": "exact_id", "expected": ["cjk-id-session-stub"], "qid": "r-id-2", "question": "会话 8a41c0d3-52e6-41f7-9b3a-6d0e2f7b9c14 一共存了多少条记忆？"}
+{"category": "exact_id", "expected": ["cjk-id-req-503"], "qid": "r-id-3", "question": "请求 req_01J8ZQ7T4R6X2V9N5B6C 最后收到了什么响应？"}
+{"category": "exact_id", "expected": ["cjk-id-commit-revert"], "qid": "r-id-4", "question": "提交 c47b2e9 回退了什么改动？"}
+{"category": "exact_id", "expected": ["cjk-id-ticket-ops5512"], "qid": "r-id-5", "question": "工单 OPS-5512 是因为什么开的？"}
+{"category": "exact_id", "expected": ["cjk-id-order-ssd"], "qid": "r-id-6", "question": "ORD-2026-001134"}
+{"category": "exact_id", "expected": ["cjk-id-license"], "qid": "r-id-7", "question": "许可证 LIC-3K8P-92QX-1DR7 的到期日是哪天？"}
+{"category": "exact_id", "expected": ["cjk-id-container"], "qid": "r-id-8", "question": "镜像 sha256:9e2f7a4c1d8b 推进内部仓库时打了什么标签？"}
+{"category": "id_note_paraphrase", "expected": ["cjk-id-receipt-sandbox"], "qid": "r-idp-1", "question": "沙盒套餐那张零元付款回执上的 app id 是什么？"}
+{"category": "id_note_paraphrase", "expected": ["cjk-id-req-503"], "qid": "r-idp-2", "question": "嵌入 worker 那个等了半分钟的请求最后怎么了？"}
+{"category": "id_note_paraphrase", "expected": ["cjk-id-ticket-ops5512"], "qid": "r-idp-3", "question": "夜间备份跳过了哪份档案的配置？"}
+{"category": "id_note_paraphrase", "expected": ["cjk-id-order-ssd"], "qid": "r-idp-4", "question": "那批替换用的固态硬盘是哪天发货的？"}
+{"category": "id_note_paraphrase", "expected": ["cjk-id-license"], "qid": "r-idp-5", "question": "评估档的那份许可证什么时候到期？"}
+{"category": "id_note_paraphrase", "expected": ["cjk-id-container"], "qid": "r-idp-6", "question": "十月二号构建的 worker 镜像对应哪个摘要前缀？"}
+{"category": "name", "expected": ["cjk-name-junjun"], "qid": "r-name-1", "question": "骏骏是主人的什么亲戚？"}
+{"category": "name", "expected": ["cjk-name-zhihui"], "qid": "r-name-2", "question": "知惠手里的记账本编号是多少？"}
+{"category": "name", "expected": ["cjk-name-master"], "qid": "r-name-3", "question": "主人泡茶只用哪种茶？"}
+{"category": "name", "expected": ["cjk-name-liaison"], "qid": "r-name-4", "question": "网关侧的对接人应该找谁？"}
+{"category": "name", "expected": ["cjk-name-mapmaker"], "qid": "r-name-5", "question": "迷雾小镇的地图出自谁的手？"}
+{"category": "name", "expected": ["cjk-prod-zhiyuan"], "qid": "r-name-6", "question": "纸鸢是哪个功能的代号？"}
+{"category": "name", "expected": ["cjk-prod-qingwu"], "qid": "r-name-7", "question": "青梧重写的首屏预算给到多少？"}
+{"category": "name", "expected": ["cjk-prod-dengxin"], "qid": "r-name-8", "question": "灯芯这个导入器读的是什么库？"}
+{"category": "decision", "expected": ["cjk-decision-idiom-threshold"], "qid": "r-dec-1", "question": "中文问题的弃答阈值定稿前先按多少过渡？"}
+{"category": "decision", "expected": ["cjk-dec-timers-not-cron"], "qid": "r-dec-2", "question": "定时任务为什么全迁 systemd timer、不再写 cron？"}
+{"category": "decision", "expected": ["cjk-dec-journal-30d"], "qid": "r-dec-3", "question": "比 30 天更早的 journal 去了哪里？"}
+{"category": "decision", "expected": ["cjk-dec-sqlite-only"], "qid": "r-dec-4", "question": "存储为什么不上 Postgres？"}
+{"category": "decision", "expected": ["cjk-dec-two-agents"], "qid": "r-dec-5", "question": "后台 agent 同时最多允许跑几个？"}
+{"category": "decision", "expected": ["cjk-dec-batch-release"], "qid": "r-dec-6", "question": "什么样的问题才配得上一次计划外发布？"}
+{"category": "event", "expected": ["cjk-ev-fd-leak"], "qid": "r-ev-1", "question": "嵌入 worker 是哪天泄漏的文件描述符？"}
+{"category": "event", "expected": ["cjk-ev-meetup"], "qid": "r-ev-2", "question": "有界循环那篇稿子在哪座城市的小聚上讲的？"}
+{"category": "event", "expected": ["cjk-ev-m057"], "qid": "r-ev-3", "question": "M057 迁移跑了多久、库有多大？"}
+{"category": "semantic_only", "expected": ["cjk-dec-sqlite-only"], "qid": "r-sem-1", "question": "为什么这台机器上不用单独跑一个数据库服务进程？"}
+{"category": "semantic_only", "expected": ["cjk-pol-erasure"], "qid": "r-sem-2", "question": "用户要求抹掉的记忆，向量最晚几天清干净？"}
+{"category": "semantic_only", "expected": ["cjk-ev-laptop"], "qid": "r-sem-3", "question": "基准测试为什么换了台机器跑？"}
+{"category": "semantic_only", "expected": ["cjk-code-busy-timeout"], "qid": "r-sem-4", "question": "并发写入时的锁死报错是怎么治好的？"}
+{"category": "semantic_only", "expected": ["cjk-name-zhihui"], "qid": "r-sem-5", "question": "米家的储物间每周哪天上午有人整理？"}
+{"category": "semantic_only", "expected": ["cjk-prod-zhiyuan"], "qid": "r-sem-6", "question": "挂起大半年的那个同步代号卡在哪？"}
+{"category": "semantic_only", "expected": ["cjk-dec-journal-30d"], "qid": "r-sem-7", "question": "一个月之前的系统运行日志还找得回来吗？"}
+{"category": "semantic_only", "expected": ["cjk-prod-dengxin"], "qid": "r-sem-8", "question": "上千篇 Markdown 笔记是哪个工具搬进来的？"}
+{"category": "non_chinese", "expected": ["cjk-ne-en-archive"], "qid": "r-ne-1", "question": "How many copies does the mijia archive backup keep?"}
+{"category": "non_chinese", "expected": ["cjk-ne-de-watchglass"], "qid": "r-ne-2", "question": "Wann wird das Nachtglas im Wachtzimmer ausgewechselt?"}
+{"category": "non_chinese", "expected": ["cjk-fr-lantern"], "qid": "r-ne-3", "question": "Tous les combien de jours la lanterne du grenier est-elle vérifiée ?"}
+{"category": "non_chinese", "expected": ["cjk-ne-es-ferry"], "qid": "r-ne-4", "question": "¿Cada cuántos minutos sale el ferry de la niebla?"}
+{"category": "non_chinese", "expected": ["cjk-ne-pt-inn-report"], "qid": "r-ne-5", "question": "A que horas sai o relatório semanal da estalagem?"}
+{"category": "non_chinese", "expected": ["cjk-ne-vi-ferry"], "qid": "r-ne-6", "question": "Tàu thủy đến thị trấn sương lúc mấy giờ mỗi ngày?"}
+{"category": "non_chinese", "expected": ["cjk-ne-en-archive"], "qid": "r-ne-7", "question": "When does the mijia archive backup run?"}
+{"category": "paraphrase_pair", "expected": ["cjk-pp-dash-port-a", "cjk-pp-dash-port-b"], "qid": "r-pp-1", "question": "浏览器里的仪表盘走哪个端口？"}
+{"category": "paraphrase_pair", "expected": ["cjk-pp-retention-a", "cjk-pp-retention-b"], "qid": "r-pp-2", "question": "原始工具日志保留多久？"}
+{"category": "paraphrase_pair", "expected": ["cjk-pp-retro-a", "cjk-pp-retro-b"], "qid": "r-pp-3", "question": "复盘会隔多久开一次、周几几点？"}
+{"category": "paraphrase_pair", "expected": ["cjk-pp-bell-a", "cjk-pp-bell-b"], "qid": "r-pp-4", "question": "雾季的钟楼一天敲几回钟？"}
+{"category": "audit_corpus", "expected": ["cjk-world-nine-rooms-gap"], "qid": "r-world-1", "question": "九间房缺口开在第几间与第几间之间？"}
+{"category": "audit_corpus", "expected": ["cjk-world-akexili"], "qid": "r-world-2", "question": "守塔人阿克希利每晚几点点灯？"}
+{"category": "audit_corpus", "expected": ["cjk-world-maid-veil"], "qid": "r-world-3", "question": "素材 maid-veil（面纱）的不透明度调到了多少？"}
+{"category": "audit_corpus", "expected": ["cjk-world-bailu"], "qid": "r-world-4", "question": "白露在灯油房用的账本编号是多少？"}
+{"category": "audit_corpus", "expected": ["cjk-world-egret"], "qid": "r-world-5", "question": "白鹭修钟的工牌编号是多少？"}
+{"category": "audit_corpus", "expected": ["cjk-world-bailu", "cjk-world-speaker"], "qid": "r-world-6", "question": "白露在灯油房记账惯用哪只手？"}
+{"category": "audit_corpus", "expected": ["cjk-world-egret", "cjk-world-speaker"], "qid": "r-world-7", "question": "白鹭修钟惯用哪只手？"}
+{"category": "audit_corpus", "expected": ["cjk-world-allergy"], "qid": "r-world-8", "question": "白露对什么过敏、今年误食了几次？"}
+{"category": "audit_corpus", "expected": ["cjk-world-trip"], "qid": "r-world-9", "question": "白鹭四月去了哪个镇？"}
+{"category": "audit_corpus", "expected": ["cjk-world-quote"], "qid": "r-world-10", "question": "十月二日那天说“我明天就走”的人是谁？"}
+{"category": "audit_corpus", "expected": ["cjk-world-tong-keys"], "qid": "r-world-11", "question": "郑北辰手里管着几把钥匙？"}
+{"category": "audit_corpus", "expected": ["cjk-world-furnace"], "qid": "r-world-12", "question": "烧雾晶取暖的炉子一次要添几块？"}
+{"category": "audit_corpus", "expected": ["cjk-world-token"], "qid": "r-world-13", "question": "雾门的通行令牌几分钟就失效？"}
+{"category": "audit_corpus", "expected": ["cjk-world-desk-hours"], "qid": "r-world-14", "question": "钟楼问事处一周里哪几天当值？"}
+{"category": "audit_corpus", "expected": ["cjk-world-ferry-refit"], "qid": "r-world-15", "question": "渡口翻修从原定日子推迟到了哪一天？"}
+{"category": "audit_corpus", "expected": ["cjk-world-berths"], "qid": "r-world-16", "question": "临水渡口用的是几号泊位？"}
+{"category": "audit_corpus", "expected": ["cjk-world-budget"], "qid": "r-world-17", "question": "钟楼维护的月度预算是多少雾币？"}
+{"category": "audit_corpus", "expected": ["cjk-world-north-cellar"], "qid": "r-world-18", "question": "雾晶必须存放在哪个窖的哪一层？"}
+{"category": "audit_corpus", "expected": ["cjk-world-fogbell-code"], "qid": "r-world-19", "question": "fogbell_delay 的重试延迟封顶在多少秒？"}
+{"category": "audit_corpus", "expected": ["cjk-world-mapmaker-pref"], "qid": "r-world-20", "question": "周晚棠对设定修订说明的页数上限是几页？"}
+{"category": "audit_corpus", "expected": ["cjk-world-key-rotation"], "qid": "r-world-21", "question": "白鹭二月换的钟楼新钥匙哪天到期？"}
+{"category": "audit_corpus", "expected": ["cjk-world-clockmaker-unknown"], "qid": "r-world-22", "question": "老钟匠 1998 年那份工钱留下具体数目了吗？"}
+{"category": "audit_corpus", "expected": ["cjk-world-lighthouse-handoff"], "qid": "r-world-23", "question": "守塔人的每日交接定在钟楼时间几点？"}
+{"category": "audit_corpus", "expected": ["cjk-world-old-captain", "cjk-world-new-captain"], "qid": "r-world-24", "question": "2026 年 1 月的巡夜队长是谁？"}
+{"category": "audit_corpus", "expected": ["cjk-world-old-captain", "cjk-world-new-captain"], "qid": "r-world-25", "question": "八月下旬接任巡夜队长的是谁、与前任什么关系？"}
+{"category": "audit_corpus", "expected": ["cjk-world-old-ledger", "cjk-world-new-ledger"], "qid": "r-world-26", "question": "2026 年 1 月镇档案馆的账目记在什么上面？"}
+{"category": "audit_corpus", "expected": ["cjk-world-old-ledger", "cjk-world-new-ledger"], "qid": "r-world-27", "question": "九月起镇档案馆的账目换成了什么载体？"}
+{"category": "audit_corpus", "expected": ["cjk-world-multi-a"], "qid": "r-world-28", "question": "雾语解读小组的负责人是谁？"}
+{"category": "audit_corpus", "expected": ["cjk-world-multi-a", "cjk-world-multi-b"], "qid": "r-world-29", "question": "负责雾语解读的人用什么墨水、一天最多接几段？"}
+{"category": "audit_corpus", "expected": ["cjk-world-fogseason-ban"], "qid": "r-world-30", "question": "雾季的哪个月整月禁止出雾墙探险？"}
+{"category": "audit_corpus", "expected": ["cjk-world-cellar-phrase"], "qid": "r-world-31", "question": "钟楼地窖的应急口令是什么？"}
+{"category": "audit_corpus", "expected": ["cjk-mijia-dinner"], "qid": "r-mijia-1", "question": "米家周末的晚饭几点开饭？"}
+{"category": "audit_corpus", "expected": ["cjk-mijia-cat"], "qid": "r-mijia-2", "question": "米家的猫每年几月做体检？"}
+{"category": "audit_ops", "expected": ["cjk-ops-mist-0"], "qid": "r-ops-1", "question": "MIST_SOAK2_FINAL_00000 里的虚构钟楼部署 0 用哪个端口？"}
+{"category": "audit_ops", "expected": ["cjk-ops-mist-1"], "qid": "r-ops-2", "question": "谁批准了 MIST_SOAK2_FINAL_00001 的合成恢复清单？"}
+{"category": "audit_ops", "expected": ["cjk-ops-world-0000"], "qid": "r-ops-3", "question": "WORLD-0000 的工单草稿里旧泊位号是多少？"}
+{"category": "audit_ops", "expected": ["cjk-ops-world-0001"], "qid": "r-ops-4", "question": "WORLD-0001 是哪天决定渡口账目继续用泊位簿的？"}
+{"category": "audit_ops", "expected": ["cjk-ops-world-0005"], "qid": "r-ops-5", "question": "WORLD-0005 里存的恢复口令是什么？"}
