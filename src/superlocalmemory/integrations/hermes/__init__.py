@@ -119,6 +119,38 @@ def _resolve_pin_profile() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Cron scheduler hint guard
+#
+# The hermes scheduler prefixes every cron run's task prompt with its
+# instruction block (hermes-agent ``cron/scheduler_prompt.py`` ``_CRON_HINT``:
+# delivery rules, [SILENT], [CRON_FAILURE], recursion warnings). In a cron
+# session that block is often the only "user" content in view, so the
+# pre-compression and memory-write mirrors kept storing it as if the user had
+# said it — three junk facts and eleven stranded ingestion operations on
+# 2026-10-19, one of which failed materialisation every ~90s for hours. The
+# hint is transport, not memory: matching the fixed opening phrase plus one
+# invariant interior marker keeps a user merely quoting a fragment of it
+# storeable while the real block never lands.
+# ---------------------------------------------------------------------------
+
+_CRON_HINT_OPENING = "[IMPORTANT: You are running as a scheduled cron job."
+_CRON_HINT_MARKERS = (
+    'respond with exactly "[SILENT]"',
+    "[CRON_FAILURE] on the first line",
+    "NEVER create or update a cron job",
+)
+
+
+def _is_cron_hint(text: str) -> bool:
+    """True when ``text`` is (or embeds) the hermes cron scheduler hint."""
+    if not text:
+        return False
+    return _CRON_HINT_OPENING in text and any(
+        marker in text for marker in _CRON_HINT_MARKERS
+    )
+
+
+# ---------------------------------------------------------------------------
 # Daemon transport
 #
 # The gateway process may not have the superlocalmemory package installed —
@@ -860,6 +892,9 @@ class SuperLocalMemoryProvider(MemoryProvider):
         """Mirror built-in memory writes to MSLM (personal scope)."""
         if not self._can_serve() or not content:
             return
+        if _is_cron_hint(content):
+            logger.debug("MSLM on_memory_write dropped cron scheduler hint")
+            return
 
         def _write() -> None:
             try:
@@ -895,6 +930,10 @@ class SuperLocalMemoryProvider(MemoryProvider):
             role = msg.get("role", "")
             content = msg.get("content", "")
             if isinstance(content, str) and content.strip() and role in {"user", "assistant"}:
+                if _is_cron_hint(content):
+                    # The cron scheduler hint rides in as a user message;
+                    # real content elsewhere in the window still flushes.
+                    continue
                 parts.append(f"{role}: {content[:_PRE_COMPRESS_MSG_TRUNCATE]}")
 
         if not parts:
