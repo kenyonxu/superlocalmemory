@@ -1,3 +1,101 @@
-{"content": "重连退避 reconnect_backoff() 现在从 2 秒起步、按 1.8 倍递增、上限 90 秒；旧的固定 5 秒在弱网下会让摄取队列越堆越长。", "key": "cjk-code-reconnect-backoff", "kind": "code_note", "project": "core"}
-{"content": "决定：中文问题的弃答阈值不再复用英文拟合出的 0.30，由周晓兰在十月的中文基线里单独给出，定稿前先按 0.34 过渡。", "key": "cjk-decision-idiom-threshold", "kind": "decision", "project": "core"}
-{"content": "对外的对接人：网关找陈立群，计费找王雅文；工单升级先联系这两位，不要走总台。", "key": "cjk-name-liaison", "kind": "name", "project": "core"}
+{"content": "重连退避 reconnect_backoff() 现在从 2 秒起步、按 1.8 倍递增、上限 90 秒；旧的固定 5 秒在弱网下会让摄取队列越堆越长。", "key": "cjk-code-reconnect-backoff", "kind": "code", "project": "core"}
+{"content": "守护启动器 wait_for_socket() 现在最多等 12 秒再拉起第二个守护；旧值 3 秒在机械盘上每次都会拉出双份守护。", "key": "cjk-code-daemon-wait", "kind": "code", "project": "core"}
+{"content": "journald.conf 里 SystemMaxUse=800M、SystemKeepFree=2G；无上限的 journal 曾把根分区吃到 92%。", "key": "cjk-code-journal-size", "kind": "code", "project": "core"}
+{"content": "备份的 systemd timer 用 OnCalendar=*-*-* 04:23:00 再加 RandomizedDelaySec=300，避开整点的任务尖峰。", "key": "cjk-code-timer-calendar", "kind": "code", "project": "core"}
+{"content": "摄取守护改成 systemd socket 触发（slmd-ingest.socket），第一条连接到来之前不占内存。", "key": "cjk-code-socket-activation", "kind": "code", "project": "core"}
+{"content": "parse_cn_window() 能读“上上周三”“最近三周”和 ISO 日期段，返回一对 UTC 时间；读不懂就返回 None。", "key": "cjk-code-parse-window", "kind": "code", "project": "core"}
+{"content": "中文检索走 trigram（n=3）分词，bigram 只作回退；单字查询直接落 FTS5。", "key": "cjk-code-trigram", "kind": "code", "project": "core"}
+{"content": "每条 SQLite 连接都开 PRAGMA journal_mode=WAL，busy_timeout 设 4000 毫秒；并发写入下的 “database is locked” 从此没再出现。", "key": "cjk-code-busy-timeout", "kind": "code", "project": "core"}
+{"content": "迁移执行器在 storage/migrations/__init__.py，按数字序应用 M0NN_*.py，已应用过的编号会跳过。", "key": "cjk-code-migration-runner", "kind": "code", "project": "core"}
+{"content": "SLM_INGEST_NO_DEDUP=1 只在重建索引时用；平时开着会留下成片的重复记忆。", "key": "cjk-code-dedup-flag", "kind": "code", "project": "core"}
+{"content": "默认 recall_limit 是 10；MCP 工具层把任何超过 50 的请求一律截到 50 才进引擎。", "key": "cjk-code-recall-limit", "kind": "code", "project": "core"}
+{"content": "原子记忆的 FTS5 表用 external content 模式配 jieba 分词，由触发器同步——行一落库就能被关键词搜到。", "key": "cjk-code-fts-jieba", "kind": "code", "project": "core"}
+{"content": "mslm 4.2.6 发布：中文弃答门（answer-gate）上线，BM25 的版本号分词也修了；PyPI 与 npm 同日推送。", "key": "cjk-ver-426", "kind": "release", "project": "core"}
+{"content": "mslm 4.2.5 是窄发布：只有嵌入 worker 的重试修复和一处仪表盘补丁，没有别的。", "key": "cjk-ver-425", "kind": "release", "project": "core"}
+{"content": "从 mslm 4.2.6 起，M3d 基线固定为 0.73：所有中文回归都对齐这条线，跌破 0.70 才回滚配方。", "key": "cjk-ver-m3d-baseline", "kind": "release", "project": "core"}
+{"content": "守护 slmd v0.2.7 修了 unix socket 的权限位（0770 改 0750），多用户机器上不再互踢。", "key": "cjk-ver-slmd-027", "kind": "release", "project": "core"}
+{"content": "Python 3.13 从 mslm 4.2.0 起受支持；lancedb 的轮子没跟上，向量后端继续用 sqlite-vec。", "key": "cjk-ver-python313", "kind": "release", "project": "core"}
+{"content": "MCP 一致性测试台（conformance）要 Node 22，CI 还钉在 Node 20，那条作业每次都红。", "key": "cjk-ver-node22", "kind": "release", "project": "core"}
+{"content": "RRF（倒数排名融合）：每个召回通道为它返回的每条结果加上 1/(k+rank)，k 取 15。", "key": "cjk-acr-rrf", "kind": "concept", "project": "core"}
+{"content": "FSRS 的稳定度随成功回忆增长，复习间隔能从 3 天一路拉到 21 天。", "key": "cjk-acr-fsrs", "kind": "concept", "project": "core"}
+{"content": "CSLS（跨域相似度局部缩放）会减去每个词与邻居的平均相似度——枢纽词原本对什么查询都能刷出 0.8 以上，缩完就老实了。", "key": "cjk-acr-csls", "kind": "concept", "project": "core"}
+{"content": "托管网关的 SLA 是月度 99.5% 可用率，P1 事件 4 小时内响应。", "key": "cjk-acr-sla", "kind": "concept", "project": "core"}
+{"content": "MRR（平均倒数排名）把每个问题首个正确答案的 1/rank 取平均。", "key": "cjk-acr-mrr", "kind": "concept", "project": "core"}
+{"content": "收到删除请求后立刻删除记忆行，对应向量排入队列，30 天内清干净。", "key": "cjk-pol-erasure", "kind": "policy", "project": "core"}
+{"content": "沙盒套餐的付款回执：app id asdk_app_7c3f5a19d4e20b68，金额 0.00 USD，状态 succeeded。", "key": "cjk-id-receipt-sandbox", "kind": "receipt", "project": "core"}
+{"content": "订单 ORD-2026-001134：两块替换用 SSD，3 月 9 日发货，顺丰运单号 SF1409221873664。", "key": "cjk-id-order-ssd", "kind": "receipt", "project": "core"}
+{"content": "许可证 LIC-3K8P-92QX-1DR7 属于评估档，2026 年 12 月 31 日到期。", "key": "cjk-id-license", "kind": "receipt", "project": "core"}
+{"content": "会话 8a41c0d3-52e6-41f7-9b3a-6d0e2f7b9c14 结束时存了 14 条记忆、召回 2 次。", "key": "cjk-id-session-stub", "kind": "session", "project": "core"}
+{"content": "请求 req_01J8ZQ7T4R6X2V9N5B6C 等 30 秒后收到嵌入 worker 的 HTTP 503。", "key": "cjk-id-req-503", "kind": "log", "project": "core"}
+{"content": "镜像 sha256:9e2f7a4c1d8b... 打上标签 slm-worker:2026-10-02 推进了内部仓库。", "key": "cjk-id-container", "kind": "log", "project": "core"}
+{"content": "提交 c47b2e9 回退了 BM25 分词改动——它把 4.2.6 这样的版本号拆成了三个词元。", "key": "cjk-id-commit-revert", "kind": "commit", "project": "core"}
+{"content": "工单 OPS-5512：夜间备份跳过了“米家档案”配置，原因是锁文件过期了。", "key": "cjk-id-ticket-ops5512", "kind": "ticket", "project": "core"}
+{"content": "骏骏是主人的表弟，隔两周的周六来米家吃饭，今年来了 11 次；只喝常温矿泉水，不吃香菜，用左手写字。", "key": "cjk-name-junjun", "kind": "person", "project": "mijia"}
+{"content": "知惠管米家的储物间和换季衣物清单，每周三上午整理；她的记账本编号 ZH-07。", "key": "cjk-name-zhihui", "kind": "person", "project": "mijia"}
+{"content": "主人泡茶只用凤凰单丛，水温 95 度；22 点以后不碰咖啡。", "key": "cjk-name-master", "kind": "person", "project": "mijia"}
+{"content": "对外的对接人：网关找顾清源，计费找孟繁星；工单升级先联系这两位（工作日 10:00–18:00），不要走总台。", "key": "cjk-name-liaison", "kind": "person", "project": "core"}
+{"content": "周晚棠负责迷雾小镇的地图，全部用点绘；一张镇中心图要画 40 小时。", "key": "cjk-name-mapmaker", "kind": "person", "project": "misttown"}
+{"content": "纸鸢是远程同步的代号，因冲突解决器无人设计，已经挂起 7 个月。", "key": "cjk-prod-zhiyuan", "kind": "product", "project": "core"}
+{"content": "青梧是仪表盘重写的代号，用 Astro，首屏预算 90 KB，不带任何客户端框架。", "key": "cjk-prod-qingwu", "kind": "product", "project": "core"}
+{"content": "灯芯是 Markdown 笔记导入器，读 Obsidian 库并把文件夹名保留成标签，已导入 1200 篇。", "key": "cjk-prod-dengxin", "kind": "product", "project": "core"}
+{"content": "决定：中文问题的弃答阈值不再复用英文拟合出的 0.30，由知惠在十月的中文基线里单独给出，定稿前先按 0.34 过渡。", "key": "cjk-decision-idiom-threshold", "kind": "decision", "project": "core"}
+{"content": "决定：定时任务不再写 cron，全部迁到 systemd timer——cron 挂了没有 journal 可查。", "key": "cjk-dec-timers-not-cron", "kind": "decision", "project": "core"}
+{"content": "决定：journal 只保留 30 天，更早的归档到外置盘、不删；总量归 SystemMaxUse 管。", "key": "cjk-dec-journal-30d", "kind": "decision", "project": "core"}
+{"content": "决定：存储只用 SQLite，不上 Postgres——本地优先的安装必须在一台没有任何服务进程的机器上也能跑。", "key": "cjk-dec-sqlite-only", "kind": "decision", "project": "core"}
+{"content": "决定：后台 agent 同时最多 2 个；第三个曾把一周的用量额度一天耗光。", "key": "cjk-dec-two-agents", "kind": "decision", "project": "core"}
+{"content": "决定：非阻塞修复攒够 5 条才发一版；只有阻塞级问题才配得上一次计划外发布。", "key": "cjk-dec-batch-release", "kind": "decision", "project": "core"}
+{"content": "8 月 14 日嵌入 worker 泄漏文件描述符，守护跑了 6 小时后撞上打开文件数上限。", "key": "cjk-ev-fd-leak", "kind": "event", "project": "core"}
+{"content": "10 月 2 日在杭州的小聚上讲了有界循环那篇稿子，台下 17 人。", "key": "cjk-ev-meetup", "kind": "event", "project": "core"}
+{"content": "9 月 9 日 M057 迁移在 0.95 GB 的库上跑了 41 秒。", "key": "cjk-ev-m057", "kind": "event", "project": "core"}
+{"content": "旧笔记本 7 月电池鼓包，之后所有基准都在新机器上跑。", "key": "cjk-ev-laptop", "kind": "event", "project": "core"}
+{"content": "The mijia archive backup runs at 03:15 and keeps the last five copies.", "key": "cjk-ne-en-archive", "kind": "note", "project": "intl"}
+{"content": "Das Nachtglas im Wachtzimmer wird jeden Freitag um 17:30 ausgewechselt.", "key": "cjk-ne-de-watchglass", "kind": "note", "project": "intl"}
+{"content": "La lanterne du grenier est vérifiée tous les cent vingt jours.", "key": "cjk-fr-lantern", "kind": "note", "project": "intl"}
+{"content": "El ferry de la niebla sale cada 30 minutos hasta el anochecer.", "key": "cjk-ne-es-ferry", "kind": "note", "project": "intl"}
+{"content": "O relatório semanal da estalagem sai na segunda-feira às 07:30.", "key": "cjk-ne-pt-inn-report", "kind": "note", "project": "intl"}
+{"content": "Tàu thủy đến thị trấn sương lúc 6 giờ sáng mỗi ngày.", "key": "cjk-ne-vi-ferry", "kind": "note", "project": "intl"}
+{"content": "本地仪表盘监听 9765 端口。", "key": "cjk-pp-dash-port-a", "kind": "fact", "project": "core"}
+{"content": "浏览器里要开的仪表盘由本机的 9765 端口提供服务。", "key": "cjk-pp-dash-port-b", "kind": "fact", "project": "core"}
+{"content": "原始工具日志保留 21 天，到期删除。", "key": "cjk-pp-retention-a", "kind": "fact", "project": "core"}
+{"content": "没加工过的工具输出我们存三周——也就是 21 天——然后清掉。", "key": "cjk-pp-retention-b", "kind": "fact", "project": "core"}
+{"content": "复盘会固定在每两周一轮的周四 14:30 开始。", "key": "cjk-pp-retro-a", "kind": "fact", "project": "core"}
+{"content": "每隔一个周四，下午 2 点半，我们开团队回顾。", "key": "cjk-pp-retro-b", "kind": "fact", "project": "core"}
+{"content": "雾季的钟楼一天只敲两回钟：8 点和 20 点，其余整点静默。", "key": "cjk-pp-bell-a", "kind": "fact", "project": "misttown"}
+{"content": "迷雾小镇的钟楼逢整点报时，唯独雾季一天只响两回——早晚 8 点各一次。", "key": "cjk-pp-bell-b", "kind": "fact", "project": "misttown"}
+{"content": "九间房缺口开在第七间与第八间之间，宽 3.2 米，只够一人侧身；雾就从这道缺口漏进镇里。", "key": "cjk-world-nine-rooms-gap", "kind": "audit", "project": "misttown"}
+{"content": "阿克希利是旧灯塔的守塔人，每晚 19:40 点灯、清晨 05:20 熄灯，三十七年没断过一晚。", "key": "cjk-world-akexili", "kind": "audit", "project": "misttown"}
+{"content": "素材编号 maid-veil（面纱）用在第三章女仆的立绘上，不透明度 0.4；替换件 maid-veil-b 已于上月废弃。", "key": "cjk-world-maid-veil", "kind": "audit", "project": "misttown"}
+{"content": "白露在灯油房记账，惯用左手，账本编号 A-7。", "key": "cjk-world-bailu", "kind": "audit", "project": "misttown"}
+{"content": "白鹭在钟楼地机室修钟，惯用右手，工牌编号 R-9。", "key": "cjk-world-egret", "kind": "audit", "project": "misttown"}
+{"content": "[白露]: 我管灯油账，账本是 A-7。[白鹭]: 我管修钟，工牌是 R-9。", "key": "cjk-world-speaker", "kind": "audit", "project": "misttown"}
+{"content": "白露对榛子过敏，今年误食 2 次都去了医务站；白鹭没有任何已知过敏。", "key": "cjk-world-allergy", "kind": "audit", "project": "misttown"}
+{"content": "白鹭 4 月去了临水镇；白露 5 月去了灰港。", "key": "cjk-world-trip", "kind": "audit", "project": "misttown"}
+{"content": "[白鹭]: 白露前天说“我明天就走”，但到今天还没走。这话是 10 月 2 日记下的。", "key": "cjk-world-quote", "kind": "audit", "project": "misttown"}
+{"content": "郑北辰管北仓的 3 把钥匙；郑南川管南仓的 5 把钥匙。他们是两个不同的人。", "key": "cjk-world-tong-keys", "kind": "audit", "project": "misttown"}
+{"content": "雾晶炉是烧雾晶取暖的炉子，一次添 3 块；雾晶炉架只是晾雾晶的木架，最多挂 12 串。两样东西不相干。", "key": "cjk-world-furnace", "kind": "audit", "project": "misttown"}
+{"content": "雾门的通行令牌 47 分钟失效；续门令可以用 14 天。", "key": "cjk-world-token", "kind": "audit", "project": "misttown"}
+{"content": "钟楼问事处每周一至周五 09:00–17:00 当值，用的是钟楼时间。", "key": "cjk-world-desk-hours", "kind": "audit", "project": "misttown"}
+{"content": "渡口翻修从 6 月 12 日推迟到 7 月 19 日，因为承建的商行没过账目审查。", "key": "cjk-world-ferry-refit", "kind": "audit", "project": "misttown"}
+{"content": "临水渡口用 9 号泊位；灰港渡口用 11 号泊位。", "key": "cjk-world-berths", "kind": "audit", "project": "misttown"}
+{"content": "钟楼维护的月度预算是 1870.50 雾币，不含灯油开支。", "key": "cjk-world-budget", "kind": "audit", "project": "misttown"}
+{"content": "雾晶必须存放在北窖 B2 层；搬迁到南窖的提议以 4 比 3 被否决。", "key": "cjk-world-north-cellar", "kind": "audit", "project": "misttown"}
+{"content": "雾铃的唤醒重试是 def fogbell_delay(attempt): return min(120, 3 ** attempt)；连试 7 次后就停。", "key": "cjk-world-fogbell-code", "kind": "audit", "project": "misttown"}
+{"content": "周晚棠要求设定修订说明简短并附页码，超过 2 页就退回；她讨厌在设定集里用表情符号。", "key": "cjk-world-mapmaker-pref", "kind": "audit", "project": "misttown"}
+{"content": "2026-02-18 白鹭换了钟楼地机室的钥匙，新钥匙 2026-08-18 到期。", "key": "cjk-world-key-rotation", "kind": "audit", "project": "misttown"}
+{"content": "老钟匠 1998 年那份工钱的具体数目没有记载，谁也交不出这个数。", "key": "cjk-world-clockmaker-unknown", "kind": "audit", "project": "misttown"}
+{"content": "守塔人的每日交接定在钟楼时间 16:15。", "key": "cjk-world-lighthouse-handoff", "kind": "audit", "project": "misttown"}
+{"content": "2026 年 1 月时，巡夜队的队长是佟九。", "key": "cjk-world-old-captain", "kind": "audit", "project": "misttown"}
+{"content": "2026 年 8 月 20 日起，巡夜队长换成佟玖，接替佟九。两人是表兄弟，不是同一人。", "key": "cjk-world-new-captain", "kind": "audit", "project": "misttown"}
+{"content": "2026 年 1 月，镇档案馆的账目还记在纸卷上。", "key": "cjk-world-old-ledger", "kind": "audit", "project": "misttown"}
+{"content": "2026 年 9 月起，镇档案馆的账目改记雾晶板，替换了纸卷。", "key": "cjk-world-new-ledger", "kind": "audit", "project": "misttown"}
+{"content": "雾语解读的负责人是阮沅，小组连她在内共 4 人。", "key": "cjk-world-multi-a", "kind": "audit", "project": "misttown"}
+{"content": "阮沅解读雾语只用蓝墨水，一天最多接 12 段。", "key": "cjk-world-multi-b", "kind": "audit", "project": "misttown"}
+{"content": "雾季（11 月整月）禁止出雾墙探险；要采雾晶只能选月初的晴日。", "key": "cjk-world-fogseason-ban", "kind": "audit", "project": "misttown"}
+{"content": "钟楼地窖的应急口令是 misty-canary-otter-92——纯虚构的合成值，对任何真实的门都不生效。", "key": "cjk-world-cellar-phrase", "kind": "audit", "project": "misttown"}
+{"content": "MIST_SOAK2_FINAL_00000: 虚构钟楼部署 0 用端口 6100；白鹭批准了合成恢复清单。", "key": "cjk-ops-mist-0", "kind": "audit", "project": "misttown"}
+{"content": "MIST_SOAK2_FINAL_00001: 虚构钟楼部署 1 用端口 6101；白鹭批准了合成的钟楼恢复清单。", "key": "cjk-ops-mist-1", "kind": "audit", "project": "misttown"}
+{"content": "阮沅持有设定工单 WORLD-0000；工单草稿里的旧泊位号是 5400。", "key": "cjk-ops-world-0000", "kind": "audit", "project": "misttown"}
+{"content": "WORLD-0001：2026-02-02 设定组决定渡口账目继续用泊位簿，不上雾晶板。", "key": "cjk-ops-world-0001", "kind": "audit", "project": "misttown"}
+{"content": "WORLD-0005 存了虚构场景的恢复口令：fog --restore --ring south-bell-3。", "key": "cjk-ops-world-0005", "kind": "audit", "project": "misttown"}
+{"content": "米家的晚饭固定 19:00 开饭，周末提前半小时。", "key": "cjk-mijia-dinner", "kind": "audit", "project": "mijia"}
+{"content": "米家的猫叫年糕，9 岁，只睡书房的藤椅，体检每年 4 月做。", "key": "cjk-mijia-cat", "kind": "audit", "project": "mijia"}
