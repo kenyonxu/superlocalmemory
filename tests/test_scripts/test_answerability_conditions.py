@@ -86,7 +86,7 @@ def test_each_question_is_asked_gate_off_then_gated_back_to_back(monkeypatch):
     ev = _load("answerability_eval")
     questions = [("real", {"qid": f"r{i}", "question": f"q{i}", "expected": ["k"]})
                  for i in range(3)]
-    monkeypatch.setattr(ev, "_questions", lambda suite: questions)
+    monkeypatch.setattr(ev, "_questions", lambda suite, corpus="en": questions)
     seen = []
 
     class _Engine:

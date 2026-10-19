@@ -1,0 +1,3 @@
+{"content": "重连退避 reconnect_backoff() 现在从 2 秒起步、按 1.8 倍递增、上限 90 秒；旧的固定 5 秒在弱网下会让摄取队列越堆越长。", "key": "cjk-code-reconnect-backoff", "kind": "code_note", "project": "core"}
+{"content": "决定：中文问题的弃答阈值不再复用英文拟合出的 0.30，由周晓兰在十月的中文基线里单独给出，定稿前先按 0.34 过渡。", "key": "cjk-decision-idiom-threshold", "kind": "decision", "project": "core"}
+{"content": "对外的对接人：网关找陈立群，计费找王雅文；工单升级先联系这两位，不要走总台。", "key": "cjk-name-liaison", "kind": "name", "project": "core"}
