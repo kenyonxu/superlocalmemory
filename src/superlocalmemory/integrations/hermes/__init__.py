@@ -26,6 +26,9 @@ import logging
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
@@ -115,6 +118,65 @@ def _resolve_pin_profile() -> bool:
         return True
 
 
+# ---------------------------------------------------------------------------
+# Daemon transport
+#
+# The gateway process may not have the superlocalmemory package installed —
+# its workspace pins (websockets/mcp) conflict with ours, which is exactly
+# why plugin.yaml declares no pip_dependencies. The daemon-first path must
+# therefore not require the package: when it is absent, the helpers below
+# discover the daemon the same way ``cli.daemon`` does (state-dir port
+# files) and speak plain stdlib HTTP to the loopback endpoint. The CLI's
+# descriptor-ownership protocol is an anti-spoofing measure for the CLI
+# itself; a plugin that already trusts the local state directory for its
+# configuration uses the lighter reachability + health-identity check.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_DAEMON_PORT = 8765
+_DAEMON_HEALTH_TIMEOUT = 2.0
+
+
+def _slm_state_dir() -> Path:
+    """The daemon's state directory, env overrides first (data_root order)."""
+    env = (
+        os.environ.get("SLM_DATA_DIR")
+        or os.environ.get("SL_MEMORY_PATH")
+        or os.environ.get("SLM_HOME")
+    )
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".superlocalmemory"
+
+
+def _daemon_port() -> int:
+    state = _slm_state_dir()
+    try:
+        first_line = (
+            (state / "daemon.port").read_text(encoding="utf-8").strip().splitlines()[0]
+        )
+        return int(first_line)
+    except Exception:
+        pass
+    try:
+        info = json.loads((state / "daemon.json").read_text(encoding="utf-8"))
+        return int(info["port"])
+    except Exception:
+        return _DEFAULT_DAEMON_PORT
+
+
+def _bare_daemon_request(
+    method: str, path: str, body: Optional[dict] = None, timeout: float = 8.0
+) -> Optional[dict]:
+    """One stdlib JSON request to the loopback daemon, no proxy in between."""
+    url = f"http://127.0.0.1:{_daemon_port()}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"} if data else {}
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
 def _daemon_available(retries: int = 1, retry_delay: float = 0.5) -> bool:
     """True when the unified daemon is alive.
 
@@ -123,13 +185,29 @@ def _daemon_available(retries: int = 1, retry_delay: float = 0.5) -> bool:
     window) read as daemon-down and every cron lane reported not-ready. One
     retry half a second later rides out the transient without weakening the
     identity check itself.
+
+    Package-present gateways keep the full ``cli.daemon`` ownership check; a
+    package-less gateway (see the transport note above) falls back to the
+    stdlib health probe, which only asks that the loopback daemon answer
+    with a daemon-shaped ``/health``.
     """
+    try:
+        from superlocalmemory.cli.daemon import is_daemon_running
+    except ImportError:
+        is_daemon_running = None
     for attempt in range(retries + 1):
         try:
-            from superlocalmemory.cli.daemon import is_daemon_running
-
-            if bool(is_daemon_running()):
-                return True
+            if is_daemon_running is not None:
+                if bool(is_daemon_running()):
+                    return True
+            else:
+                health = _bare_daemon_request(
+                    "GET", "/health", None, _DAEMON_HEALTH_TIMEOUT,
+                )
+                if isinstance(health, dict) and health.get("status") in {
+                    "ok", "starting",
+                }:
+                    return True
         except Exception:
             pass
         if attempt < retries:
@@ -140,11 +218,15 @@ def _daemon_available(retries: int = 1, retry_delay: float = 0.5) -> bool:
 def _daemon_api(
     method: str, path: str, body: Optional[dict] = None, timeout: float = 8.0
 ) -> Optional[dict]:
-    """Thin wrapper over ``cli.daemon.daemon_request`` (auth handled there)."""
+    """Send one daemon request (package transport when installed, stdlib otherwise)."""
     try:
         from superlocalmemory.cli.daemon import daemon_request
-
-        return daemon_request(method, path, body, timeout_seconds=timeout)
+    except ImportError:
+        daemon_request = None  # type: ignore[assignment]
+    try:
+        if daemon_request is not None:
+            return daemon_request(method, path, body, timeout_seconds=timeout)
+        return _bare_daemon_request(method, path, body, timeout)
     except Exception as exc:
         logger.debug("MSLM daemon request failed (%s %s): %s", method, path, exc)
         return None
@@ -264,12 +346,18 @@ class SuperLocalMemoryProvider(MemoryProvider):
     # -- Availability check --------------------------------------------------
 
     def is_available(self) -> bool:
-        """Return ``True`` if ``superlocalmemory`` is importable."""
+        """True when the package is importable OR the daemon is reachable.
+
+        The gateway workspace cannot install mslm-memory (its websockets/mcp
+        pins conflict with the gateway's own), so a package-less gateway runs
+        this provider in daemon-only mode. Availability gates on service, not
+        on the import: with the package absent, a reachable daemon answers.
+        """
         try:
             importlib.import_module("superlocalmemory")
             return True
         except ImportError:
-            return False
+            return _daemon_available()
 
     # -- Config schema -------------------------------------------------------
 
@@ -365,27 +453,34 @@ class SuperLocalMemoryProvider(MemoryProvider):
             or "default"
         )
 
-        # 2. Load MSLM config and apply overrides
+        # 2. Load MSLM config and apply overrides. A package-less gateway
+        # (the plugin declares no pip_dependencies on purpose) or an
+        # unreadable config keeps serving in daemon-only mode — the daemon
+        # holds its own configuration — instead of going dark.
+        daemon_only = False
         try:
             from superlocalmemory.core.config import SLMConfig
 
             self._slm_config = SLMConfig.load()
         except Exception:
-            logger.warning("MSLM config load failed — provider disabled")
-            return
-        self._slm_config.active_profile = self._mslm_profile
+            if not _daemon_available():
+                logger.warning("MSLM config load failed — provider disabled")
+                return
+            daemon_only = True
+        if self._slm_config is not None:
+            self._slm_config.active_profile = self._mslm_profile
 
-        mode_override = config_override.get("mode")
-        if mode_override:
-            try:
-                from superlocalmemory.storage.models import Mode
+            mode_override = config_override.get("mode")
+            if mode_override:
+                try:
+                    from superlocalmemory.storage.models import Mode
 
-                self._slm_config.mode = Mode[mode_override]
-            except KeyError:
-                logger.warning(
-                    "MSLM unknown mode '%s' — using config default",
-                    mode_override,
-                )
+                    self._slm_config.mode = Mode[mode_override]
+                except KeyError:
+                    logger.warning(
+                        "MSLM unknown mode '%s' — using config default",
+                        mode_override,
+                    )
 
         # 3. Read recall-scope flags (type-safe bool parsing)
         self._include_global = self._parse_bool(
@@ -406,6 +501,15 @@ class SuperLocalMemoryProvider(MemoryProvider):
         if agent_context in {"cron", "flush"} or platform == "cron":
             self._cron_skipped = True
             logger.debug("MSLM skipped: cron/flush context")
+            return
+
+        if daemon_only:
+            self._session_id = session_id
+            logger.info(
+                "MSLM package/config unavailable — daemon-only mode "
+                "(profile=%s)",
+                self._mslm_profile,
+            )
             return
 
         # 5. Create engine and initialise with timeout protection

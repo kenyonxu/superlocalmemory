@@ -925,7 +925,12 @@ class TestPluginYAML:
         assert data is not None
         assert data.get("name") == "superlocalmemory"
         assert "version" in data
-        assert "pip_dependencies" in data
+        # 2026-09-25: pip_dependencies deliberately ABSENT — mslm-memory's
+        # websockets/mcp pins conflict with the gateway workspace, and the
+        # provider serves daemon-only without the package (see
+        # test_packageless_gateway.py). Declaring deps here would break the
+        # gateway's plugin-manager resolution for every platform extra.
+        assert "pip_dependencies" not in data
         assert "hooks" in data
 
 
