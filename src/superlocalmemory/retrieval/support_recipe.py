@@ -34,9 +34,12 @@ always be traced to the numbers that made it.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
+
+logger = logging.getLogger(__name__)
 
 #: The inputs, in order. ``support_gate.features`` defines each one.
 FEATURES: tuple[str, ...] = (
@@ -208,7 +211,58 @@ ANSWER_SUPPORT_EG2_V1 = SupportRecipe(
     },
 )
 
-_RECIPES = {r.version: r for r in (ANSWER_SUPPORT_V1, ANSWER_SUPPORT_V2, ANSWER_SUPPORT_EG2_V1)}
+#: Fitted 19 October 2026 by scripts/quality/answerability_fit.py on the
+#: Chinese twin of that corpus (scripts/quality/answerability_corpus_cjk.py,
+#: corpus version answerability-corpus-cjk-v1, digest 8124ea49a983b9b7, a
+#: 2,001-memory store built and measured with nomic like v2), profile A, the
+#: same split answer-support-split-v1: 132 training questions, 85 held out.
+#: The threshold is the widest-margin point between the highest held-out
+#: nonsense question (logit -2.361) and the lowest held-out real question
+#: (logit 0.432), ~1.4 logits of room on both sides.
+#:
+#: WHY a Chinese store needs its own numbers: v2 is fitted on the EN corpus
+#: and mis-kills Chinese questions -- a Chinese question whose unique term
+#: exactly hits its memory scored p 0.0149 against v2's 0.3003 bar (运维笔记
+#: §25, 2026-10-19), twenty times short, so every exact hit abstained. The
+#: differences from v2 are the fit's, not a lowered bar: the cross-encoder
+#: carries real weight (0.3006 vs 0.1324 -- CJK questions hit candidates that
+#: are Latin code and ids, where it votes), ``ce_missing`` imputes at 6.98,
+#: the median measured vote, and keyword_coverage sits at its floor 3.0 as in
+#: every fit. Priors (clip, Laya, metadata) unchanged from v2.
+#:
+#: Both this and v2 are fitted on nomic, so this is not in the model-key
+#: mapping below: ``auto`` keeps v2 and no other store's recall changes; a
+#: store that mostly reads Chinese opts in with
+#: ``retrieval.answer_support_recipe = "cjk-v1"`` (``select``).
+ANSWER_SUPPORT_CJK_V1 = SupportRecipe(
+    version="answer-support-cjk-v1",
+    weights={"hub_corrected": 9.1744, "keyword_coverage": 3.0,
+             "cross_encoder": 0.3006, "log_bm25": 0.0, "entity_hit": 0.9276,
+             "oov_phrase": 0.0, "rare_miss": -4.156,
+             "nonsense_similarity": -16.6133, "orphan_terms": -5.4854,
+             "unframed_miss": -10.1838},
+    intercept=9.1836,
+    threshold=0.2760,  # logit -0.9642
+    ce_clip=(-12.0, 10.0),
+    ce_missing=6.98,
+    hub_missing_baseline=0.544,
+    hub_corrected_unmeasured=0.1,
+    nonsense_similarity_missing=0.37,
+    laya_unsupported=-1.5,  # prior, as v2
+    metadata_bonus=0.5,     # prior, as v2
+    fitted_on="answerability-corpus-cjk-v1/8124ea49a983b9b7/answer-support-split-v1",
+    held_out={
+        "all": "real kept 30/30, nonsense abstain 26/26, "
+               "no-answer abstain 11/14",
+        "legacy": "real kept 9/9, nonsense abstain 26/26, "
+                  "no-answer abstain 13/14",
+        "described": "real kept 21/21, nonsense abstain 26/26, "
+                     "no-answer abstain 12/14",
+    },
+)
+
+_RECIPES = {r.version: r for r in (ANSWER_SUPPORT_V1, ANSWER_SUPPORT_V2,
+                                   ANSWER_SUPPORT_CJK_V1, ANSWER_SUPPORT_EG2_V1)}
 ACTIVE: SupportRecipe = ANSWER_SUPPORT_V2
 
 #: The text model each recipe was fitted on. Two of its inputs are raw cosines
@@ -248,12 +302,38 @@ def recipe(version: str) -> SupportRecipe:
     return _RECIPES[version]
 
 
+#: What ``retrieval.answer_support_recipe`` may name besides "auto": the short
+#: name of a recipe an operator can pin. An explicit choice wins over the
+#: model-key mapping, so a store that mostly reads Chinese can pin the CJK
+#: recipe on a model whose own fit is v2's EN numbers.
+_BY_SETTING: dict[str, SupportRecipe] = {
+    "v2": ANSWER_SUPPORT_V2,
+    "cjk-v1": ANSWER_SUPPORT_CJK_V1,
+}
+
+
+def select(setting: str, model: str = "") -> SupportRecipe:
+    """The recipe the configuration asks for, for ``model``. "auto" (and any
+    value this build does not know, with a warning) is today's behaviour:
+    the recipe fitted on the model, ACTIVE without one; an explicit version
+    always wins. Reads nothing but its arguments -- callable whatever else is
+    switched off."""
+    wanted = (setting or "auto").strip().lower()
+    explicit = _BY_SETTING.get(wanted)
+    if explicit is not None:
+        return explicit
+    if wanted != "auto":
+        logger.warning("answer_support_recipe %r is not one of auto, %s; "
+                       "using auto", setting, ", ".join(_BY_SETTING))
+    return for_model(model) or ACTIVE
+
+
 def approved_for_text(model: str) -> bool:
     """``model``'s recipe met the bar for moving a store's text onto it."""
     key = _model_key(model)
     return bool(key) and any(key in (name, name.rsplit("/", 1)[-1]) for name in APPROVED_FOR_TEXT)
 
 
-__all__ = ["ACTIVE", "ANSWER_SUPPORT_EG2_V1", "ANSWER_SUPPORT_V1", "ANSWER_SUPPORT_V2",
-           "APPROVED_FOR_TEXT", "FEATURES", "SupportRecipe", "approved_for_text", "for_model",
-           "recipe"]
+__all__ = ["ACTIVE", "ANSWER_SUPPORT_CJK_V1", "ANSWER_SUPPORT_EG2_V1",
+           "ANSWER_SUPPORT_V1", "ANSWER_SUPPORT_V2", "APPROVED_FOR_TEXT", "FEATURES",
+           "SupportRecipe", "approved_for_text", "for_model", "recipe", "select"]

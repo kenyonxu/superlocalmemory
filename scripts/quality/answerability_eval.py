@@ -25,11 +25,13 @@ no LLM attached, so nothing leaves the machine and no model server is called).
 Both use the cross-encoder, as both modes do.
 
     python scripts/quality/answerability_eval.py --work /tmp/ans-eval [--profiles a,b]
-        [--cache DIR] [--out report.json] [--rows rows.jsonl]
+        [--cache DIR] [--corpus {en,cjk}] [--out report.json] [--rows rows.jsonl]
 
 The store is built once per corpus digest into ``--cache`` (default: under
 ``--work``) and copied for each profile, so a measurement never changes it.
-Refuses to run against this account's own memory folder.
+``--corpus cjk`` measures the Chinese twin corpus (answerability_corpus_cjk.py)
+against its own fixtures; the default ``en`` path is the recorded baseline's,
+byte for byte. Refuses to run against this account's own memory folder.
 
 Output: counts, rates, ids, scores and timings. Synthetic text only.
 Exit codes: 0 measured · 2 bad input · 3 refused.
@@ -60,11 +62,17 @@ def _bootstrap() -> None:
         sys.path.insert(0, str(source))
 
 
-def _load_corpus_module():
-    name = "answerability_corpus"
+#: Corpus selector: the EN store the recorded baselines name, and its Chinese
+#: twin (answerability_corpus_cjk.py) for CJK calibration. The no-argument
+#: call stays the EN module, so the default path is unchanged.
+_CORPUS_MODULES = {"en": "answerability_corpus", "cjk": "answerability_corpus_cjk"}
+
+
+def _load_corpus_module(corpus: str = "en"):
+    name = _CORPUS_MODULES[corpus]
     if name in sys.modules:
         return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, _HERE / "answerability_corpus.py")
+    spec = importlib.util.spec_from_file_location(name, _HERE / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -210,10 +218,11 @@ def _backfill(engine) -> dict:
 
 # -- build ---------------------------------------------------------------------------
 
-def build_store(cache: Path, *, log=print, embedder: str = "nomic") -> Path:
+def build_store(cache: Path, *, log=print, embedder: str = "nomic",
+                corpus: str = "en") -> Path:
     """Build the synthetic store once per corpus digest; return its data folder."""
-    corpus = _load_corpus_module()
-    digest = corpus.digest()
+    module = _load_corpus_module(corpus)
+    digest = module.digest()
     root = store_dir(cache, digest, embedder)
     data = root / "data"
     keymap_path = root / "keymap.json"
@@ -225,7 +234,7 @@ def build_store(cache: Path, *, log=print, embedder: str = "nomic") -> Path:
     _refuse_own_store(data)
     engine = _engine("a", data, embedder=embedder)
     keymap: dict[str, list[str]] = {}
-    rows = corpus.corpus()
+    rows = module.corpus()
     t0 = time.monotonic()
     try:
         for i, row in enumerate(rows):
@@ -242,7 +251,7 @@ def build_store(cache: Path, *, log=print, embedder: str = "nomic") -> Path:
         engine.close()
     _set_lifecycles(data, rows, keymap)
     empty = [k for k, ids in keymap.items() if not ids]
-    keymap_path.write_text(json.dumps({"digest": digest, "corpus_version": corpus.CORPUS_VERSION,
+    keymap_path.write_text(json.dumps({"digest": digest, "corpus_version": module.CORPUS_VERSION,
                                        "keys": keymap, "no_fact": empty}, indent=1),
                            encoding="utf-8")
     log(f"built {len(rows)} memories in {time.monotonic() - t0:.0f} s "
@@ -375,11 +384,11 @@ SUITES = {"hand": _HAND, "dev": _HAND + _DEV, "fresh": _FRESH, "frozen": _HAND +
           "all": _HAND + _DEV + _FRESH}
 
 
-def _questions(suite: str = "hand") -> list[tuple[str, dict]]:
+def _questions(suite: str = "hand", corpus: str = "en") -> list[tuple[str, dict]]:
     """``(kind, question)`` pairs; each question carries its ``source`` file."""
-    corpus = _load_corpus_module()
+    module = _load_corpus_module(corpus)
     return [(kind, {**q, "source": name.rsplit("/", 1)[-1]}) for name, kind in SUITES[suite]
-            for q in corpus.load_questions(name)]
+            for q in module.load_questions(name)]
 
 
 def _hit_rank(keys: list[str], expected: list[str]) -> int | None:
@@ -413,7 +422,7 @@ def _ask_one(engine, set_name: str, q: dict, memory_to_key: dict) -> dict:
 
 
 def measure_conditions(engine, suite: str, memory_to_key: dict, names: list[str],
-                       log=print) -> dict:
+                       log=print, corpus: str = "en") -> dict:
     """The merge rule: each condition gated against gate-off (conditions module).
 
     Each question is asked gate-off and then gated, back to back: in two
@@ -425,7 +434,7 @@ def measure_conditions(engine, suite: str, memory_to_key: dict, names: list[str]
     for name in names:
         gated, before = [], []
         with cond.condition(engine, name):
-            for set_name, q in _questions(suite):
+            for set_name, q in _questions(suite, corpus):
                 with cond.gate_off():
                     before.append(_ask_one(engine, set_name, q, memory_to_key))
                 gated.append(_ask_one(engine, set_name, q, memory_to_key))
@@ -437,7 +446,8 @@ def measure_conditions(engine, suite: str, memory_to_key: dict, names: list[str]
 
 def measure_profile(profile: str, store_root: Path, work: Path, *,
                     warm_timeout_s: float = 300.0, log=print, suite: str = "hand",
-                    conditions: list[str] | None = None, embedder: str = "nomic") -> dict:
+                    conditions: list[str] | None = None, embedder: str = "nomic",
+                    corpus: str = "en") -> dict:
     keymap = json.loads((store_root / "keymap.json").read_text(encoding="utf-8"))["keys"]
     data = work / f"data-{profile}"
     if data.exists():
@@ -445,7 +455,7 @@ def measure_profile(profile: str, store_root: Path, work: Path, *,
     shutil.copytree(store_root / "data", data)
     _refuse_own_store(data)
     memory_to_key = _memory_ids(data, keymap)
-    slices = _load_corpus_module().slice_of_key()
+    slices = _load_corpus_module(corpus).slice_of_key()
     engine = _engine(profile, data, embedder=embedder)
     rows: list[dict] = []
     latencies: list[float] = []
@@ -455,7 +465,7 @@ def measure_profile(profile: str, store_root: Path, work: Path, *,
         log(f"profile {profile}: warm {warm}")
         os.environ.pop("SLM_RECALL_NO_FLOOR", None)
         os.environ.pop("SLM_RECALL_NO_SUPPORT_GATE", None)
-        for set_name, q in _questions(suite):
+        for set_name, q in _questions(suite, corpus):
             t0 = time.monotonic()
             response = engine.recall(q["question"], limit=RECALL_LIMIT, fast=True)
             latencies.append((time.monotonic() - t0) * 1000.0)
@@ -479,7 +489,7 @@ def measure_profile(profile: str, store_root: Path, work: Path, *,
         os.environ["SLM_RECALL_NO_FLOOR"] = "1"
         os.environ["SLM_RECALL_NO_SUPPORT_GATE"] = "1"
         by_qid = {row["qid"]: row for row in rows}
-        for _set_name, q in _questions(suite):
+        for _set_name, q in _questions(suite, corpus):
             response = engine.recall(q["question"], limit=RECALL_LIMIT, fast=True)
             feats = []
             for r in response.results:
@@ -499,17 +509,18 @@ def measure_profile(profile: str, store_root: Path, work: Path, *,
                 row["expected_features"] = hits[0] if hits else None
         os.environ.pop("SLM_RECALL_NO_FLOOR", None)
         os.environ.pop("SLM_RECALL_NO_SUPPORT_GATE", None)
-        by_condition = (measure_conditions(engine, suite, memory_to_key, conditions, log)
+        by_condition = (measure_conditions(engine, suite, memory_to_key, conditions, log,
+                                           corpus=corpus)
                         if conditions else None)
     finally:
         os.environ.pop("SLM_RECALL_NO_FLOOR", None)
         os.environ.pop("SLM_RECALL_NO_SUPPORT_GATE", None)
         engine.close()
-    return {"profile": profile, "warm": warm, **summarise(rows, latencies), "rows": rows,
-            **({"conditions": by_condition} if by_condition else {})}
+    return {"profile": profile, "warm": warm, **summarise(rows, latencies, corpus=corpus),
+            "rows": rows, **({"conditions": by_condition} if by_condition else {})}
 
 
-def summarise(rows: list[dict], latencies: list[float]) -> dict:
+def summarise(rows: list[dict], latencies: list[float], corpus: str = "en") -> dict:
     nonsense = [r for r in rows if r["set"] == "nonsense"]
     real = [r for r in rows if r["set"] == "real"]
     unanswerable = [r for r in rows if r["set"] == "unanswerable"]
@@ -533,7 +544,7 @@ def summarise(rows: list[dict], latencies: list[float]) -> dict:
         "by_category": by_category,
         "by_source": _by_source(rows),
         "separation": separation([r for r in rows if "question_features" in r]),
-        "slices": {name: _slice_block(rows, name) for name in SLICES},
+        "slices": {name: _slice_block(rows, name, corpus=corpus) for name in SLICES},
         "failures": {
             "nonsense_answered": [r["qid"] for r in nonsense if not r["abstained"]],
             "real_missed": [r["qid"] for r in real if not _hit(r)],
@@ -554,14 +565,14 @@ def _by_source(rows: list[dict]) -> dict:
     return out
 
 
-def _slice_block(rows: list[dict], name: str) -> dict:
+def _slice_block(rows: list[dict], name: str, corpus: str = "en") -> dict:
     """The gate and the separation as seen from one slice of the store.
 
     Real questions: those whose memory is in the slice. Nonsense: answered
     "by this slice" when any returned memory belongs to it, so the abstain
     rate says whether this slice's memories let nonsense through.
     """
-    slices = _load_corpus_module().slice_of_key()
+    slices = _load_corpus_module(corpus).slice_of_key()
     real = [r for r in rows if r["set"] == "real" and r["slice"] == name]
     nonsense = [r for r in rows if r["set"] == "nonsense"]
     answered = [r["qid"] for r in nonsense
@@ -604,19 +615,21 @@ def gate_failures(report: dict) -> list[str]:
 
 def run(work: Path, profiles: list[str], cache: Path | None = None, *,
         warm_timeout_s: float = 300.0, log=print, suite: str = "hand",
-        conditions: list[str] | None = None, embedder: str = "nomic") -> dict:
+        conditions: list[str] | None = None, embedder: str = "nomic",
+        corpus: str = "en") -> dict:
     _bootstrap()
     work.mkdir(parents=True, exist_ok=True)
     _refuse_own_store(work)
-    corpus = _load_corpus_module()
-    store_root = build_store(cache or (work / "cache"), log=log, embedder=embedder)
-    report = {"corpus_version": corpus.CORPUS_VERSION, "corpus_digest": corpus.digest(),
+    module = _load_corpus_module(corpus)
+    store_root = build_store(cache or (work / "cache"), log=log, embedder=embedder,
+                             corpus=corpus)
+    report = {"corpus_version": module.CORPUS_VERSION, "corpus_digest": module.digest(),
               "top_k": TOP_K, "suite": suite, "embedder": embedder, "profiles": []}
     for profile in profiles:
         report["profiles"].append(measure_profile(profile, store_root, work,
                                                   warm_timeout_s=warm_timeout_s, log=log,
                                                   suite=suite, conditions=conditions,
-                                                  embedder=embedder))
+                                                  embedder=embedder, corpus=corpus))
     report["gate_failures"] = gate_failures(report)
     return report
 
@@ -636,6 +649,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--embedder", default="nomic",
                    help="text model to measure: nomic (shipped) or gemma (EmbeddingGemma 2, "
                         "needs the managed model environment)")
+    p.add_argument("--corpus", default="en", choices=["en", "cjk"],
+                   help="corpus to measure: en (the recorded baselines) or cjk (the Chinese "
+                        "twin, answerability_corpus_cjk)")
     p.add_argument("--out", help="full report (JSON)")
     p.add_argument("--rows", help="per-question rows (JSON Lines)")
     return p
@@ -660,7 +676,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = run(Path(args.work), profiles, Path(args.cache) if args.cache else None,
                      warm_timeout_s=args.warm_timeout, log=lambda m: print(m, file=sys.stderr),
-                     suite=args.suite, conditions=conditions, embedder=args.embedder)
+                     suite=args.suite, conditions=conditions, embedder=args.embedder,
+                     corpus=args.corpus)
     except Refused as exc:
         print(f"answerability-eval: {exc}", file=sys.stderr)
         return 3

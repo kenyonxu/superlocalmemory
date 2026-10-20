@@ -49,8 +49,12 @@ def explicit_filter(facets: Any, window: Any, *, as_of: Any = None,
 
 def assess(retrieval_engine: Any, query: str, response: Any, verdict: Any,
            profile_id: str, *, metadata: Callable[[list[str]], Mapping] | None = None,
+           config: Any = None,
            ) -> support_gate.Assessment | None:
     """Give every result its evidence, then the gate's verdict over them.
+
+    ``config`` is the caller's config (the one whose ``retrieval`` section
+    ``enabled`` reads): its ``answer_support_recipe`` picks the gate's recipe.
 
     None -- no verdict, the score contract unchanged -- when there is nothing
     to judge: no results (the empty set keeps its own reason, since a channel
@@ -83,16 +87,21 @@ def assess(retrieval_engine: Any, query: str, response: Any, verdict: Any,
     status = (getattr(response, "local_reranker_status", "")
               or getattr(response, "reranker_status", None))
     return support_gate.assess(results, response.query_evidence or {}, verdict=verdict,
-                               recipe=recipe_for(retrieval_engine), reranker_status=status)
+                               recipe=recipe_for(retrieval_engine, config),
+                               reranker_status=status)
 
 
-def recipe_for(retrieval_engine: Any):
-    """The recipe fitted on the live text model; today's recipe for any model
-    without its own fit, so no other model's recall changes."""
+def recipe_for(retrieval_engine: Any, config: Any = None):
+    """The recipe the gate decides with. ``config`` is the caller's config:
+    its ``retrieval.answer_support_recipe`` ("auto", "v2", "cjk-v1") wins --
+    an explicit choice overrides the model key. Without one, the recipe
+    fitted on the live text model; today's recipe for any model without its
+    own fit, so no other model's recall changes."""
     from superlocalmemory.retrieval import support_recipe
 
+    setting = getattr(getattr(config, "retrieval", config), "answer_support_recipe", "auto")
     model = getattr(getattr(retrieval_engine, "_embedder", None), "model_name", "") or ""
-    return support_recipe.for_model(str(model)) or support_recipe.ACTIVE
+    return support_recipe.select(str(setting), str(model))
 
 
 def _small_store(db: Any, profile_id: str) -> bool:

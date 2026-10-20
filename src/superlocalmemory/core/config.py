@@ -489,6 +489,13 @@ class RetrievalConfig:
     # plain reason (``show_weak`` shows the weak matches). Env kill-switch:
     # SLM_RECALL_NO_SUPPORT_GATE=1 disables it without a release.
     answer_support_gate: bool = True
+    # Which recipe that gate decides with (retrieval/support_recipe.py):
+    # "auto" -- the recipe fitted on the live text model, today's recipe for
+    # a model without its own fit (unchanged behaviour); "v2" -- v2's EN
+    # numbers explicitly; "cjk-v1" -- the recipe fitted on the Chinese
+    # corpus, for a store that mostly reads Chinese. An explicit choice wins
+    # over "auto"; any other value falls back to "auto" with a warning.
+    answer_support_recipe: str = "auto"
     # 4.1.25: query rewriting for the keyword channel only (retrieval/
     # query_rewrite.py): base forms and entity aliases in every mode; in Mode B
     # optionally a few keywords from the LOCAL model, bounded by the timeout and
