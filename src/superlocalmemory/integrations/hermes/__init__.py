@@ -843,6 +843,13 @@ class SuperLocalMemoryProvider(MemoryProvider):
         clean_user = (sanitize_context(user_content) or "").strip()
         clean_asst = (sanitize_context(assistant_content) or "").strip()
 
+        if _is_cron_hint(clean_user):
+            # The whole turn is a machine run: the task template riding below
+            # the hint is static boilerplate, and real cron output reaches
+            # the store through on_memory_write / slm_remember instead.
+            logger.debug("MSLM sync_turn dropped cron scheduler hint turn")
+            return
+
         # Semantic noise filter — skip very short / templatic responses
         if not clean_user or clean_user.strip().lower() in _SEMANTIC_NOISE:
             return
@@ -1164,6 +1171,20 @@ class SuperLocalMemoryProvider(MemoryProvider):
         content = (params.get("content") or "").strip()
         if not content:
             return tool_error("content is required")
+
+        if _is_cron_hint(content):
+            # Neither an error nor a silent success: the caller learns the
+            # hint is transport and nothing was stored.
+            return json.dumps(
+                {
+                    "status": "filtered",
+                    "message": (
+                        "cron scheduler hint is transport, not memory — "
+                        "not stored."
+                    ),
+                },
+                ensure_ascii=False,
+            )
 
         scope = params.get("scope", "personal")
         if scope not in ("personal", "shared", "global"):

@@ -18,6 +18,7 @@ content riding alongside it still does.
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -38,6 +39,11 @@ class _SyncThread:
     def start(self):
         if self._target:
             self._target()
+
+    def is_alive(self):
+        # sync_turn drops a turn when the prior write thread is "alive";
+        # synchronous execution means every call must look finished.
+        return False
 
 # The actual template, verbatim from hermes-agent cron/scheduler_prompt.py
 # (_CRON_HINT), so the markers cannot drift from the real thing.
@@ -145,3 +151,90 @@ class TestOnPreCompressGuard:
             {"role": "user", "content": _CRON_HINT},
         ])
         store.assert_not_called()
+
+
+class TestSyncTurnGuard:
+    """The third write path: the per-turn mirror (2026-10-21 leak).
+
+    Every cron run's injected hint rode in as the turn's "user" content and
+    landed one row per run (54/day) — the guard existed only on the two
+    hook paths above. The whole turn is dropped, not trimmed: the "body"
+    below the hint is a static task template, so trimming would keep the
+    leak at full volume with shorter rows.
+    """
+
+    @pytest.fixture()
+    def provider(self):
+        p = SuperLocalMemoryProvider()
+        p._session_id = "s1"
+        return p
+
+    def _run(self, provider, user, assistant):
+        with patch.object(provider, "_engine_store") as store, patch.object(
+            provider, "_can_serve", return_value=True,
+        ), patch("superlocalmemory.integrations.hermes.threading.Thread", _SyncThread):
+            provider.sync_turn(user, assistant)
+        return store
+
+    def test_hint_turn_never_reaches_store(self, provider):
+        store = self._run(
+            provider,
+            _CRON_HINT + "\n\n你是知惠的系统健康 watchdog。解析上方的 JSON。",
+            "OK",
+        )
+        store.assert_not_called()
+
+    def test_hint_turn_with_real_assistant_reply_still_dropped(self, provider):
+        """Dropping is per-turn, not per-field: a real reply below a hint
+        user message is still a machine run's output."""
+        store = self._run(provider, _CRON_HINT, "健康检查完成：issues 为空，一切正常。")
+        store.assert_not_called()
+
+    def test_real_turn_still_stored_in_user_hermes_format(self, provider):
+        store = self._run(provider, "今天去了九间房看缺口。", "已记录缺口坐标。")
+        store.assert_called_once()
+        combined = store.call_args[0][0]
+        assert combined.startswith("User: 今天去了九间房看缺口。")
+        assert "\nHermes: 已记录缺口坐标。" in combined
+
+    def test_quoting_the_opening_phrase_alone_stays_storeable(self, provider):
+        quote = (
+            "你看到过那个 [IMPORTANT: You are running as a scheduled "
+            "cron job. 开头的东西吗？"
+        )
+        store = self._run(provider, quote, "那是调度器的提示词，不是记忆。")
+        store.assert_called_once()
+
+
+class TestToolRememberGuard:
+    """The fourth write path: the slm_remember tool (agent-initiated).
+
+    No leak has been observed here, but the invariant — the hint is
+    transport, not memory — must hold on every path that can store.
+    """
+
+    @pytest.fixture()
+    def provider(self):
+        p = SuperLocalMemoryProvider()
+        p._session_id = "s1"
+        return p
+
+    def _run(self, provider, content):
+        with patch.object(provider, "_engine_store") as store, patch.object(
+            provider, "_can_serve", return_value=True,
+        ):
+            store.return_value = ["fact_1"]
+            result = provider._tool_remember({"content": content})
+        return store, result
+
+    def test_hint_content_returns_filtered_and_never_stores(self, provider):
+        store, result = self._run(provider, f"user: {_CRON_HINT}")
+        store.assert_not_called()
+        payload = json.loads(result)
+        assert payload["status"] == "filtered"
+        assert "not stored" in payload["message"]
+
+    def test_real_content_still_stored(self, provider):
+        store, result = self._run(provider, "米家日常的扩展点家族又添了新成员。")
+        store.assert_called_once()
+        assert json.loads(result)["status"] == "stored"
