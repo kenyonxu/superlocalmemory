@@ -136,19 +136,35 @@ env -u ALL_PROXY -u all_proxy PYTHONPATH=src ~/miniconda3/bin/python \
 另跑同目录全量测试做回归。已知基线：卫生测试 1 红为上游 v2-archive 文档遗留
 (merge 基线既有，与本次无关），不因此卡关。
 
-### Task 4 — 存量清理 421 条（生产操作，设确认点）
+### Task 4 — 存量清理（生产操作，设确认点）
 
-走 daemon 正规删除路径，**禁止直接 SQL 改写**(daemon 拥有唯一写路径；10/19 教训：
-手工软删导致派生层每 90 秒失败一次）。
+**预审修订（2026-10-21，dry-run 实测后）**：原方案 `slm forget <子串>` **否决**。
+预审发现 `/api/memories` 列的是 **live 状态的 atomic_facts**（不是 memories 表），
+子串匹配既会误删真人对话（实测 99 条 live 短语事实中有 2 条是真人对话——
+"[Kai.Xu] mslm守卫…"与"[ASYNC DELEGATION COMPLETE…]"，恰好都在讨论本问题），
+又删不掉派生事实里不含短语的绝大部分。清理单元改为 **memory 级枚举、
+fact 级擦除**：
 
-1. 基线（只读）:SQL 统计 profile zhihui 下 cron 样板数并记录；
-2. dry-run 预审：`slm --profile zhihui forget "You are running as a scheduled cron job" --dry-run --json`
-   ——matched_count 与基线对齐、抽查样本内容全为 cron 样板后才放行；
-3. 执行：`slm --profile zhihui forget "You are running as a scheduled cron job" --yes`
-   (daemon `DELETE /api/memories/<id>` 逐条，派生层随正规路径一致清理）;
-4. 验证：SQL 计数归零；`atomic_facts` 里 cron 样板派生事实同步归零。
+- **junk 精确集合**：421 条以 `User: [IMPORTANT: You are running as a scheduled
+  cron job.` 开头的 memories（sync_turn 形态；第 422 条含短语的 memory 是真人
+  对话，排除）→ 其全部子事实 **1089 条**（1047 live + 42 archived）。
+- **枚举**（只读 SQL）：按父 memory 前缀取子事实——按血统而非子串，真人对话
+  零误伤是构造保证。
+- **删除**：逐条走 daemon 正规擦除端点 `DELETE /api/memories/<fact_id>`
+  （`delete_fact_authorized`，带投影清理与审计；与 `slm delete` 同路）。
+  驱动脚本 `/tmp/cronjunk/cleanup.py`：404=已删过（可续跑）、503 重试×3、
+  401/403 立即中止。
+- **源 memories 行保留**（provenance 空壳）：daemon 无 memory 级删除面；
+  recall 只读 facts；保留供审计。验证口径改为 **fact 级归零**。
+- **前置检查已过**：pending.db 0 行（无滞留 ingestion 操作，10/19 型
+  派生层重试陷阱不存在）；daemon 健康、活跃 profile=zhihui。
 
-时机：安排在 Task 5 的 gateway 停用窗口内（写入方停机，清理期间不会有新样板落入）。
+步骤：
+
+1. 基线（只读）：1089 junk 子事实、2 条真人短语事实（保护对照组）；
+2. 窗口内执行 `cleanup.py`（gateway 先停，无在途写入）；
+3. 验证：junk 子事实归零（含 live 与 archived）；2 条真人短语事实仍在；
+   阳性：一次正常交互照常落库。
 
 ### Task 5 — 部署与验证（生产操作，设确认点）
 
