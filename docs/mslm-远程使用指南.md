@@ -241,6 +241,7 @@ systemctl --user start hermes-discord-watchdog.timer hermes-discord-line-watchdo
 | 401 | key 缺失/吊销/未绑定 profile | `slm remote keys list` 核对；吊销是下一请求即生效 |
 | `remote_profile_not_allowed` | 工具参数带了 key 之外的 profile_id | 改 key 的绑定 profile，或换对应 profile 的 key |
 | TLS 验证失败 | 客户端没加载 ca.pem / 服务器证书重签过 / 连了证书外的地址 | 核对 `ssl_verify`/`NODE_EXTRA_CA_CERTS`；`curl --cacert .../ca.pem https://<地址>:8443/health` 复测 |
+| Node 报 `Client network socket disconnected before secure TLS established` | 2026-10-24 前版本的 uvloop TLS gate 竞态 | 升级到含 eager-handshake 修复的 daemon；当前生产已经工作机 Node 24 连发 8/8 实测，无需客户端 pacing 中继 |
 | 429 | 写限速（默认 30/分/机器） | `SLM_RATE_LIMIT_WRITE` 上调后重启 daemon |
 | 503 MATERIALIZATION_INCOMPLETE | 投影未就绪（擦除/写入反压语义） | 稍候重试，属设计行为 |
 | 远端 `/slm remember` 报 NOT SAVED | 服务器停机窗 / 网络断 | 检查 `GET /health`；窗口内的重要内容手动重存 |
