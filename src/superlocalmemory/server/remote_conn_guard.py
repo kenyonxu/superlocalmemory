@@ -200,7 +200,10 @@ def tls_gate_protocol_class(context: ssl.SSLContext, base: type | None = None) -
             limits.handshaking.add(self)
             # Nothing is read until the TLS layer is in place.
             transport.pause_reading()  # type: ignore[attr-defined]
-            self._task = self._loop.create_task(self._handshake())
+            # Install SSLProtocol before uvloop starts reading on return; a
+            # scheduled task lets an accept-time ClientHello bypass the TLS layer.
+            self._task = asyncio.Task(
+                self._handshake(), loop=self._loop, eager_start=True)
 
         def data_received(self, data: bytes) -> None:
             self._pending_bytes += len(data)

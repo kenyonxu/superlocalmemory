@@ -57,7 +57,7 @@ def limits(request, monkeypatch):
     monkeypatch.setattr(remote_conn_guard, "MAX_OPEN_CONNECTIONS", 3)
 
 
-def _run(scenario) -> None:
+def _run(scenario, *, loop_factory=None) -> None:
     info = remote_commands.tls_init(["localhost"], ["127.0.0.1"], 30, force=True)
     port = _port()
     cfg = remote_listener.RemoteListenerConfig(
@@ -88,7 +88,7 @@ def _run(scenario) -> None:
             await asyncio.wait_for(task, 15)
 
     try:
-        asyncio.run(outer())
+        asyncio.run(outer(), loop_factory=loop_factory)
     finally:
         sock.close()
 
@@ -106,6 +106,33 @@ async def _closed_within(reader, seconds: float) -> bool:
 def _close(writer) -> None:
     with contextlib.suppress(Exception):
         writer.close()
+
+
+def test_uvloop_immediate_client_hellos_complete_the_handshake(limits, monkeypatch) -> None:
+    """A scheduled handshake task must not strand an accept-time ClientHello."""
+    uvloop = pytest.importorskip("uvloop")
+    # This probe exercises TLS delivery, not refusal once the HTTP caps are full.
+    monkeypatch.setattr(remote_conn_guard, "MAX_WAITING_CONNECTIONS", 32)
+    monkeypatch.setattr(remote_conn_guard, "MAX_OPEN_CONNECTIONS", 32)
+
+    async def scenario(connect):
+        async def request():
+            reader, writer = await asyncio.wait_for(connect(), 3)
+            try:
+                writer.write(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                await writer.drain()
+                head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 3)
+                assert head.startswith(b"HTTP/1.1 200"), head
+                assert await asyncio.wait_for(reader.readexactly(2), 3) == b"ok"
+            finally:
+                _close(writer)
+
+        results = await asyncio.gather(*(request() for _ in range(12)),
+                                       return_exceptions=True)
+        failures = [result for result in results if isinstance(result, Exception)]
+        assert not failures, f"early ClientHello starved the TLS handshake: {failures!r}"
+
+    _run(scenario, loop_factory=uvloop.new_event_loop)
 
 
 def test_a_silent_connection_is_closed_after_the_header_deadline(limits) -> None:
