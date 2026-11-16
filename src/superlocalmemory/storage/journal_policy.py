@@ -14,11 +14,11 @@ Resolution order:
   1. ``SLM_JOURNAL_MODE`` env var (``wal`` / ``delete`` / ...)
   2. default ``delete``
 
-One documented exemption (merge 4.2.6, ruling S8): the learning signal
-worker's own drain connection pins WAL through this module — see
-:data:`SIGNAL_WORKER_JOURNAL_MODE`. The exemption lives here so the
-"modes are decided in one place" invariant (tests/core/test_journal_mode.py)
-keeps holding.
+Two documented exemptions: the learning signal worker's drain connection
+(merge 4.2.6, ruling S8) and the mesh store's WAL database (merge 4.2.19) —
+see :data:`SIGNAL_WORKER_JOURNAL_MODE` and :data:`MESH_STORE_JOURNAL_MODE`.
+The exemptions live here so the "modes are decided in one place" invariant
+(tests/core/test_journal_mode.py) keeps holding.
 """
 
 from __future__ import annotations
@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_JOURNAL_MODE = "delete"
 
-#: The ONE connection exempt from the default: the learning signal worker's
+#: One of the two exempted connections (the other: the mesh store, below):
+#: the learning signal worker's
 #: own drain connection. It is a high-frequency background committer whose
 #: bounded stop-path flush must persist every pending batch (SW3); under
 #: DELETE each commit pays a journal-file create/delete and the shutdown
