@@ -2,21 +2,48 @@
   "name": "superlocalmemory",
   "displayName": "SuperLocalMemory",
   "description": "Starts the locally installed SuperLocalMemory MCP server so AI agents in VS Code get long-term memory that stays on your machine.",
-  "version": "4.2.6",
+  "version": "4.2.19",
   "publisher": "qualixar",
   "license": "MIT",
   "icon": "media/icon.png",
-  "engines": { "vscode": "^1.101.0" },
-  "categories": ["AI", "Other"],
-  "keywords": ["mcp", "memory", "ai", "agent", "local-first", "copilot", "long-term memory", "model context protocol", "slm", "superlocalmemory"],
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "mcp",
+    "memory",
+    "ai",
+    "agent",
+    "local-first",
+    "copilot",
+    "long-term memory",
+    "model context protocol",
+    "slm",
+    "superlocalmemory"
+  ],
   "homepage": "https://superlocalmemory.com",
-  "repository": { "type": "git", "url": "https://github.com/qualixar/superlocalmemory.git", "directory": "vscode-extension" },
-  "bugs": { "url": "https://github.com/qualixar/superlocalmemory/issues" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qualixar/superlocalmemory.git",
+    "directory": "vscode-extension"
+  },
+  "bugs": {
+    "url": "https://github.com/qualixar/superlocalmemory/issues"
+  },
   "main": "./out/extension.js",
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "mcpServerDefinitionProviders": [
-      { "id": "qualixar.superlocalmemory", "label": "SuperLocalMemory" }
+      {
+        "id": "qualixar.superlocalmemory",
+        "label": "SuperLocalMemory"
+      }
     ]
   },
   "scripts": {

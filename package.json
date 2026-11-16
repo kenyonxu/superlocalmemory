@@ -1,7 +1,7 @@
 {
   "name": "mslm-memory",
-  "version": "4.2.6",
-  "description": "Multi-Scope Local Memory for AI agents — powered by SuperLocalMemory V4. Personal / shared / global scope, hybrid retrieval, Fisher-Rao similarity, zero-LLM mode.",
+  "version": "4.2.19",
+  "description": "The governed memory brain for AI agents: one local memory for Claude Code, Codex, Cursor, Copilot, ChatGPT and any MCP client. Honest recall, documents and pictures, roles, audit and GDPR erasure.",
   "keywords": [
     "agent-memory",
     "ai-memory",

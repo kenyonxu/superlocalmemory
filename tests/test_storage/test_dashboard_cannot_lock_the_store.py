@@ -176,8 +176,8 @@ class TestRealStoreFollowsJournalPolicy:
     behaviorally by the tests above, under whichever mode is active."""
 
     def test_new_databases_follow_journal_policy(self, tmp_path):
-        from superlocalmemory.storage.database import DatabaseManager
         from superlocalmemory.storage import schema as _schema
+        from superlocalmemory.storage.database import DatabaseManager
 
         db = DatabaseManager(tmp_path / "memory.db")
         db.initialize(_schema)
@@ -189,4 +189,28 @@ class TestRealStoreFollowsJournalPolicy:
         assert str(mode).lower() == "delete", (
             f"store created in {mode!r} journal mode; expected the policy "
             f"default (delete)"
+        )
+
+    def test_wal_remains_available_via_the_policy_opt_in(
+        self, tmp_path, monkeypatch
+    ):
+        """Merge 4.2.19 union ruling: upstream's WAL property (its
+        ``test_new_databases_are_created_in_wal`` — readers never block the
+        writer) survives through the fork's central journal policy, whose
+        documented ``SLM_JOURNAL_MODE=wal`` opt-in restores it. Mirrors
+        tests/test_storage/test_concurrent_db.py::test_journal_mode_follows_policy."""
+        from superlocalmemory.storage import schema as _schema
+        from superlocalmemory.storage.database import DatabaseManager
+
+        monkeypatch.setenv("SLM_JOURNAL_MODE", "wal")
+        db = DatabaseManager(tmp_path / "memory_wal.db")
+        db.initialize(_schema)
+        conn = sqlite3.connect(tmp_path / "memory_wal.db")
+        try:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+        assert str(mode).lower() == "wal", (
+            f"store created in {mode!r} journal mode; the wal opt-in is "
+            f"expected to hold (upstream dashboard-no-lock property)"
         )

@@ -4,7 +4,7 @@
 # PyPI ships CPU-only torch wheels for macOS and Windows, but on Linux the
 # plain `torch==X.Y.Z` wheel pulls the CUDA runtime plus ~18 nvidia-* packages
 # (triton included) — about 2.6 GiB on a host that may have no GPU at all
-# (reference: https://docs.astral.sh/uv/guides/integration/pytorch/, which
+# (reference: uv's "Using uv with PyTorch" guide, which
 # documents the same PyPI default for `uv pip`; plain pip resolves the same
 # index). The official CPU-only index is documented at
 # https://pytorch.org/get-started/locally/ as:

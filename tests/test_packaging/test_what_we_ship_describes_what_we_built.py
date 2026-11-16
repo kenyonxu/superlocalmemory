@@ -97,7 +97,8 @@ class TestEveryToolWeTellAnAgentToUseExists:
                         t.strip() for t in stripped[len(key):].split(",") if t.strip()
                     ]
                     for tool in declared:
-                        if tool in host_tools or tool in real:
+                        # "Bash(slm:*)" narrows the host's Bash tool to slm commands.
+                        if tool.split("(", 1)[0] in host_tools or tool in real:
                             continue
                         problems.append(
                             f"{path.relative_to(REPO)}: declares {tool!r}, "

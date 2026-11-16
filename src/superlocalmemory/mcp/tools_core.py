@@ -17,8 +17,6 @@ import hashlib
 import logging
 from typing import Callable
 
-from mcp.types import ToolAnnotations
-
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.config import CANONICAL_LIST_LIMIT, CANONICAL_RECALL_LIMIT
 from superlocalmemory.core.operation_request import OperationKind
@@ -26,6 +24,7 @@ from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.mcp._daemon_proxy import daemon_unavailable_error
 from superlocalmemory.mcp.remote_visibility import visible_facts
 from superlocalmemory.mcp.shared import authorize_mcp_mutation, parse_id_list
+from superlocalmemory.mcp.tool_hints import ADDS, DESTROYS_ONCE, READ_ONLY, SETS
 
 logger = logging.getLogger(__name__)
 
@@ -126,15 +125,6 @@ def _emit_event(event_type: str, payload: dict | None = None,
         pass
 
 
-# `remember` only adds a memory. The hints are declared explicitly because the
-# MCP default for an unannotated tool is destructiveHint=true. They live in a
-# constant so the decorator stays on one line, which is the form the packaging
-# test's source-level tool-name discovery reads.
-_ADDS_ONLY_ANNOTATIONS = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
-)
-
-
 #: Keyword search needs no model: never warming up. Present so every recall
 #: door carries the same envelope (warming_up, status_note).
 _SEARCH_READY = {"warming_up": False, "status_note": ""}
@@ -173,8 +163,8 @@ SEARCH_NO_MATCH = "No stored memory matches those words."
 def register_core_tools(server, get_engine: Callable) -> None:
     """Register the 13 core MCP tools on *server*."""
 
-    # Adds a memory; never deletes or overwrites one (see _ADDS_ONLY_ANNOTATIONS).
-    @server.tool(annotations=_ADDS_ONLY_ANNOTATIONS)
+    # Adds a memory; never deletes or overwrites one (ADDS: not read-only, not destructive).
+    @server.tool(title="Store Memory", annotations=ADDS)
     @admits(OperationKind.REMEMBER)
     async def remember(
         content: str, tags: str = "", project: str = "",
@@ -188,6 +178,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
         provenance_kind: str = "",
         kind: str = "",
         replaces: str | None = None,
+        speaker: str = "",
     ) -> dict:
         """Store content to memory with intelligent indexing.
 
@@ -234,6 +225,11 @@ def register_core_tools(server, get_engine: Callable) -> None:
         nothing was; the memory itself is saved either way. An unknown id, or
         another profile's memory, is refused before anything is saved. Undo
         with ``review_correction(case_id, "rollback", version)``.
+
+        ``speaker`` says who "I" and "my" mean in ``content``. Leave it empty
+        and they mean you, the calling agent. Pass ``"user"`` when you are
+        saving the user's own words verbatim ("I prefer dark mode"), or a name
+        when you are recording what someone else said.
         """
         # v3.6.10: resolve "mcp_client" sentinel → URL path (HTTP) or env var (stdio)
         if agent_id == "mcp_client":
@@ -344,6 +340,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
                         "session_date": session_date,
                         "idempotency_key": effective_idempotency_key or None,
                     }
+                    if (speaker or "").strip():
+                        body["speaker"] = speaker.strip()
                     if (profile_id or "").strip():
                         # Per-request profile routing (spec section 3/5): the
                         # anchor is only put on the wire when the caller set
@@ -503,6 +501,8 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 # DaemonPoolProxy.store lifts this out of the metadata into
                 # the request's own ``replaces`` field.
                 worker_meta["replaces"] = replaces_id
+            if (speaker or "").strip():
+                worker_meta["speaker"] = speaker.strip()
 
             def _store_via_daemon_pool():
                 pool = choose_pool()
@@ -576,7 +576,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 "error": daemon_unavailable_error(),
             }
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Recall Memories", annotations=READ_ONLY)
     @admits(OperationKind.RECALL)
     async def recall(
         query: str, limit: int = CANONICAL_RECALL_LIMIT, agent_id: str = "mcp_client",
@@ -705,7 +705,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
         ``project`` it never falls back to unfiltered results — an empty
         answer says why in ``tag_scope`` (nobody ever saved that tag, versus
         something has it but not among this question's matches).
-        """
+        """  # noqa: W293
         # v3.6.10: resolve "mcp_client" sentinel → URL path (HTTP) or env var (stdio)
         if agent_id == "mcp_client":
             from superlocalmemory.mcp.agent_context import get_current_agent_id
@@ -882,7 +882,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("recall failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Search Memories", annotations=READ_ONLY)
     @admits(OperationKind.RECALL)
     async def search(query: str, limit: int = CANONICAL_RECALL_LIMIT, kind: str = "",
                      profile_id: str = "", tags: "str | list[str]" = "",
@@ -974,7 +974,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("search failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Fetch Memories", annotations=READ_ONLY)
     @admits(OperationKind.RECALL)
     async def fetch(fact_ids: "str | list[str]", profile_id: str = "") -> dict:
         """Fetch full details for specific fact IDs (comma-separated or a list).
@@ -1053,7 +1053,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
 
     register_expand_tool(server, get_engine)
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="List Recent Memories", annotations=READ_ONLY)
     @admits(OperationKind.RECALL)
     async def list_recent(
         limit: int = CANONICAL_LIST_LIMIT, kind: str = "",
@@ -1237,7 +1237,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("list_recent failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Memory Status", annotations=READ_ONLY)
     async def get_status(profile_id: str = "") -> dict:
         """Get memory system status: fact count, entity count, mode, profile, db size.
 
@@ -1247,8 +1247,6 @@ def register_core_tools(server, get_engine: Callable) -> None:
         try:
             # Same source the HTTP surface reads, imported here rather than at
             # module scope: that module costs ~260ms and MCP starts over stdio.
-            from superlocalmemory.server.routes.helpers import SLM_VERSION
-
             import asyncio
             import os
 
@@ -1257,6 +1255,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
                 is_daemon_running,
             )
             from superlocalmemory.mcp.request_profile import tool_profile
+            from superlocalmemory.server.routes.helpers import SLM_VERSION
 
             # The daemon's /status describes its active profile, so a named
             # profile is counted from the store below instead.
@@ -1331,7 +1330,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("get_status failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(title="Rebuild Knowledge Graph", annotations=SETS)
     @admits(OperationKind.CORRECT)
     async def build_graph() -> dict:
         """Rebuild knowledge graph edges for all facts in the active profile."""
@@ -1360,7 +1359,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("build_graph failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(title="Switch Memory Profile", annotations=SETS)
     @admits(OperationKind.PROFILE_SWITCH, http_kind=OperationKind.RECALL)
     async def switch_profile(profile_id: str) -> dict:
         """Switch the active memory profile. All operations scope to this profile."""
@@ -1504,7 +1503,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("switch_profile failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Backup Status", annotations=READ_ONLY)
     async def backup_status() -> dict:
         """Get backup system status, last backup time, and available backup files."""
         try:
@@ -1519,7 +1518,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("backup_status failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Memory Usage", annotations=READ_ONLY)
     async def memory_used(profile_id: str = "") -> dict:
         """Get memory usage breakdown by fact type and lifecycle state.
 
@@ -1549,7 +1548,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("memory_used failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Learned Patterns", annotations=READ_ONLY)
     async def get_learned_patterns(pattern_type: str = "", limit: int = 20,
                                    profile_id: str = "") -> dict:
         """Get learned behavioral patterns (interests, refinements, archival habits).
@@ -1572,7 +1571,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("get_learned_patterns failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(title="Correct Learned Pattern", annotations=ADDS)
     @admits(OperationKind.CORRECT)
     async def correct_pattern(pattern_id: str, correction: str, profile_id: str = "") -> dict:
         """Correct or annotate a learned behavioral pattern to improve retrieval.
@@ -1620,7 +1619,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("correct_pattern failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(destructiveHint=True))
+    @server.tool(title="Delete Memory", annotations=DESTROYS_ONCE)
     @admits(OperationKind.FORGET)
     async def delete_memory(fact_id: str, agent_id: str = "mcp_client",
                             profile_id: str = "") -> dict:
@@ -1650,7 +1649,6 @@ def register_core_tools(server, get_engine: Callable) -> None:
             import urllib.parse
 
             from superlocalmemory.cli.daemon import (
-                daemon_request,
                 is_daemon_running,
             )
             from superlocalmemory.mcp.request_profile import (
@@ -1711,7 +1709,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("delete_memory failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
+    @server.tool(title="Update Memory", annotations=DESTROYS_ONCE)
     @admits(OperationKind.CORRECT)
     async def update_memory(
         fact_id: str, content: str = "", agent_id: str = "mcp_client",
@@ -1875,7 +1873,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("update_memory failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
+    @server.tool(title="Review Correction", annotations=DESTROYS_ONCE)
     @admits(OperationKind.CORRECT)
     async def review_correction(
         case_id: str,
@@ -1961,7 +1959,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("review_correction failed")
             return {"success": False, "retryable": True, "error": "correction review unavailable"}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="List Corrections", annotations=READ_ONLY)
     async def list_corrections(limit: int = 100, profile_id: str = "") -> dict:
         """List correction cases for a human or host reviewer.
 
@@ -2000,7 +1998,7 @@ def register_core_tools(server, get_engine: Callable) -> None:
             logger.exception("list_corrections failed")
             return {"success": False, "retryable": True, "error": "correction listing unavailable"}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Attribution", annotations=READ_ONLY)
     async def get_attribution() -> dict:
         """Get system attribution: author, version, license, and provenance metadata."""
         return {

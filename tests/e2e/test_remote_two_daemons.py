@@ -27,7 +27,6 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-
 from tests._portable import child_env_base
 
 REPO = Path(__file__).resolve().parents[2]
@@ -439,8 +438,12 @@ def test_a_key_bound_to_work_is_served_for_work_while_the_host_uses_personal(pai
     for name in ("personal", "work"):
         _slm(env, "profile", "create", name)
     key = _secret(_slm(env, "remote", "keys", "add", "work-hermes", "--profile", "work").stdout)
+    # Merge 4.2.19: `--json` output is the agent-native envelope
+    # (cli/json_output.py, Q9 2026-10-06), so the rows live under
+    # ["data"]["keys"] — identical on both merge parents; this opt-in
+    # assertion simply predated the envelope and was never rerun.
     rows = {r["name"]: r for r in json.loads(_slm(env, "remote", "keys", "list",
-                                                  "--json").stdout)["keys"]}
+                                                  "--json").stdout)["data"]["keys"]}
     assert rows["work-hermes"]["profile"] == "work"
     assert rows["hermes"]["profile"] == "default" and rows["viewer"]["profile"] == "default"
     _slm(env, "profile", "switch", "personal")
@@ -459,10 +462,15 @@ def test_a_key_bound_to_work_is_served_for_work_while_the_host_uses_personal(pai
         assert local["profile"] == "personal"
         mine = mcp_call(_local_url(pair), None, True, "recall", {"query": f"{token} plan"})
         assert token not in _text(mine)
-        # A tool that can only work on the active profile says what to do.
-        refused = mcp_call(url, key, ctx, "search", {"query": token})
-        assert refused.is_error and "ask the host owner" in _text(refused)
-        assert "personal" not in _text(refused)
+        # 4.1.21: read-back tools are ROUTED to the key's profile instead of
+        # being refused while the host is elsewhere — the contract
+        # tests/test_security/test_remote_profile_binding.py::
+        # test_read_back_tools_are_routed_to_the_keys_profile_whatever_is_active
+        # enforces (and this opt-in assertion predated it). The routed search
+        # finds the fact in 'work'; 'personal' never has it (asserted above).
+        routed = mcp_call(url, key, ctx, "search", {"query": token})
+        assert not routed.is_error and token in _text(routed)
+        assert _facts_in(s, "personal", token) == 0
     finally:
         _slm(env, "profile", "switch", "default")
     bad = subprocess.run([sys.executable, "-m", "superlocalmemory.cli.main", "remote", "keys",

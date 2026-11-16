@@ -54,6 +54,7 @@ The data folder is `~/.superlocalmemory` unless `SLM_DATA_DIR`, `SL_MEMORY_PATH`
 | `slm update FACT_ID CONTENT` | Replace the text of one memory. The corrected fact is re-indexed everywhere. A review-gated change returns a correction case id | `--json` |
 | `slm delete FACT_ID` | Delete one memory by exact id | `--yes` or `-y`, `--json` |
 | `slm outcome success, partial or failure FACT_ID...` | Tell SLM how using recalled memories went; it is the command-line twin of the `report_outcome` tool ([Active Memory](Active-Memory)) | `--query-id ID` (from `slm recall --json`), `--note TEXT`, `--agent NAME`, `--report-id KEY` (a retry with it records nothing new), `--json` |
+| `slm hide FACT_ID...` | Keep memories out of recall answers and session starts without deleting them; your decision, which no automatic rule changes | `--undo` (show them again), `--json` |
 | `slm forget QUERY` | Delete every memory whose text contains the query (case-insensitive), after a confirmation | `--dry-run` preview only (with no query it previews everything), `--yes` or `-y`, `--json` |
 | `slm observe [CONTENT]` | Offer content for automatic capture; SLM decides whether it holds a decision, bug fix or preference worth storing. Reads a pipe or an argument | none |
 
@@ -129,7 +130,7 @@ See [Memory Kinds](Memory-Kinds) for what the nine kinds mean and how suggestion
 | `slm db restore POINT_ID` | Go back to a restore point, applied when SLM next starts ([Host Upgrades](Host-Upgrades)) | `--yes`, `--cancel`, `--no-reimport`, `--json` |
 | `slm db prepare-downgrade` | Get your memories ready to run on the previous SLM version | `--yes`, `--cancel`, `--json` |
 | `slm migrate` | A one-shot migrator for data from a very old install; a current install does not need it. Not the same as `slm db migrate` | `--rollback` only while the migrator's own backup still exists |
-| `slm evidence export DEST, verify BUNDLE, import BUNDLE, rebuild` | Versioned, checksummed JSONL evidence bundles. `import` and `rebuild` are dry runs unless `--execute` | `export`: `--profile`; `import`: `--profile`, `--replace`, `--rollback-dir`, `--execute`; all: `--json` |
+| `slm evidence export DEST, verify BUNDLE, import BUNDLE, rebuild` | Versioned, checksummed JSONL evidence bundles. `import` and `rebuild` are dry runs unless `--execute` | `export`: `--profile`; `import`: `--profile`, `--replace` or `--merge` (add to a profile that has memories; existing rows are kept), `--rollback-dir`, `--execute`; all: `--json` |
 | `slm backup status, recovery-key, decrypt FILE` | Cloud-backup encryption: state, the recovery key, and turning a downloaded backup into a plain `.db` file ([Cloud Backup](Cloud-Backup)) | `recovery-key --import` reads a key from stdin; `decrypt`: `-o OUT`, `--recovery-key-stdin`, `--force`; all: `--json` |
 | `slm backup restore-safety-copy` | Put back the safety copy that a failed dashboard restore kept. The service must be stopped | `--id POINT` restore a different recovery backup, `--json` |
 | `slm backup clear-recovery-needed` | Let the service start again after you repaired the stores yourself. Deletes the pre-restore copy the marker kept | `--json` |

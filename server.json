@@ -11,12 +11,27 @@
           "value": "mcp"
         }
       ],
+      "registryType": "pypi",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "version": "4.2.19"
+    },
+    {
+      "identifier": "superlocalmemory",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ],
       "registryType": "npm",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
       },
-      "version": "4.2.6"
+      "version": "4.2.19"
     }
   ],
   "repository": {
@@ -24,6 +39,6 @@
     "url": "https://github.com/qualixar/superlocalmemory"
   },
   "title": "SuperLocalMemory",
-  "version": "4.2.6",
+  "version": "4.2.19",
   "websiteUrl": "https://superlocalmemory.com"
 }

@@ -63,7 +63,10 @@ def test_windows_runs_cmd_with_the_installed_slm(name, mcp_json, root) -> None:
     assert "C:/" not in line and "plugins" not in line, line
     assert line.startswith("where.exe /q slm || ("), line
     assert line.endswith("& slm serve start 1>&2 & slm mcp"), line
-    assert "pipx install superlocalmemory" in line, line
+    # Says how to install it. No literal `pipx install` here: the Claude plugin
+    # directory reads that as an unpinned package launcher and blocks the plugin.
+    assert "Install SuperLocalMemory first" in line and "superlocalmemory.com" in line, line
+    assert "pipx install" not in line and "pip install" not in line, line
     # Characters that would break the cmd line or the host's quoting.
     assert '"' not in line and "%" not in line and "^" not in line, line
     message = line[line.index("(") + 1: line.rindex(")")]

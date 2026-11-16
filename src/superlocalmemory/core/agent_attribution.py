@@ -89,7 +89,32 @@ def audit_fields(metadata: dict[str, Any] | None) -> dict[str, str]:
     return {"claimed_agent_id": agent}
 
 
+#: Explicit speaker values that mean the human, not an agent.
+_HUMAN = frozenset({"user", "me", "the user", "human"})
+
+
+def write_speaker(explicit: str, metadata: dict[str, Any] | None) -> tuple[str, str]:
+    """``(speaker, role)`` for a save: who the first person ("I", "my") is.
+
+    Issue #265: every daemon save used to default to ``role="user"``, so an
+    agent writing "I prefer short answers" produced the derived fact "the user
+    prefers short answers". A save that carries an ``agent_id`` (every tool
+    call does; the command line, hooks and the dashboard do not) is the
+    agent's own words unless the caller names another speaker. The stored
+    memory is unchanged either way; this only steers fact extraction.
+    """
+    name = " ".join(str(explicit or "").split())[:64]
+    if name.lower() in _HUMAN:
+        return "", "user"
+    if name:
+        return name, "assistant"
+    agent = str((metadata or {}).get("agent_id") or "").strip()
+    if not agent:
+        return "", "user"
+    return ("" if agent == UNNAMED else agent), "assistant"
+
+
 __all__ = [
     "CONNECTION_HEADER", "UNNAMED", "audit_fields", "bind", "connection_agent",
-    "forwarded_headers",
+    "forwarded_headers", "write_speaker",
 ]

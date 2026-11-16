@@ -167,7 +167,9 @@ NEUTRAL_ARGUMENTS: frozenset[str] = frozenset({
     # report_id is an idempotency key, hashed with the routed profile by outcome_events;
     # it cannot select a stored report or another workspace.
     "reply_to", "report_id", "reversible", "run_id",
-    "saved_by", "session_date", "session_id", "show_weak", "skill_name", "tags", "tags_match",
+    "saved_by", "session_date", "session_id", "show_weak", "skill_name",
+    # speaker (4.2.7, #265): who "I" is in the saved text; selects no profile.
+    "speaker", "tags", "tags_match",
     "target",
     "timeout_s", "to", "tool_name", "ttl_seconds", "valid_at", "value", "window",
 })

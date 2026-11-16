@@ -21,7 +21,7 @@ import sqlite3
 from pathlib import Path
 
 #: Highest schema_version this runner can write.  Matches the trailing serial of
-#: the latest migration (M052).  Increment when adding new migrations or
+#: the latest migration (M050).  Increment when adding new migrations or
 #: table-level breaking changes.
 #:
 #: This sat at 42 while M043, M044 and M045 shipped, so for three migrations the
@@ -68,10 +68,13 @@ from pathlib import Path
 #: M062 sets an existing flag column on rows the stub rule recognises (no schema
 #: change); the ceiling follows it by the same convention, floor 51.
 #: M063 stores blank temporal dates as NULL (data only), floor 51.
-#: M064 (fork) is additive (one nullable atomic_facts column); renumbered from
-#: the fork's historical M052 after upstream took M052-M063. The ceiling
-#: follows the trailing serial, which the fork migration now defines.
-SUPPORTED_SCHEMA_VERSION: int = 64
+#: M064 removes index rows of memories that are gone (data only), floor 51.
+#: M065 removes made-up dates (data + an undo table), floor 51.
+#: M066 restores wrongly archived memories (data, same undo table), floor 51.
+#: M067 adds one trigger that queues fact changes for the projections, floor 51.
+#: M068 runs M062's stub pass again for the newer shapes (data only), floor 51.
+SUPPORTED_SCHEMA_VERSION: int = 68
+
 
 class SchemaVersionError(RuntimeError):
     """Raised when the DB's recorded schema_version exceeds the supported max.

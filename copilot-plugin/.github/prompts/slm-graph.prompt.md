@@ -1,7 +1,7 @@
 ---
 name: slm-graph
 description: >
-version: "4.2.6"
+version: "4.2.19"
 agent: agent
 tools:
   - build_code_graph
@@ -10,7 +10,7 @@ tools:
   - semantic_search_code
   - get_review_context
   - detect_changes
-  - Bash
+  - Bash(slm:*)
 ---
 
 # slm-graph — Code Intelligence Skill
@@ -313,4 +313,4 @@ All are host-only: a remote caller cannot use them.
 
 ---
 
-SuperLocalMemory v4.2.6 · Qualixar · AGPL-3.0-or-later
+SuperLocalMemory v4.2.19 · Qualixar · AGPL-3.0-or-later

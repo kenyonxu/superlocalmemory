@@ -25,13 +25,14 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from mcp.types import ToolAnnotations
-
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.mcp.remote_caller import (
-    current_remote_grant, current_remote_key_id, current_remote_media_allowed,
+    current_remote_grant,
+    current_remote_key_id,
+    current_remote_media_allowed,
 )
+from superlocalmemory.mcp.tool_hints import ADDS
 from superlocalmemory.media.upload_links import UPLOAD_BASE_URL, UploadError, default_links
 
 logger = logging.getLogger("slm.mcp.tools_media_upload")
@@ -90,7 +91,7 @@ def _link(kind: str, note: str) -> dict[str, Any]:
 def register_upload_link_tool(server: Any) -> None:
     """Register ``media_upload_link`` on *server*."""
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+    @server.tool(title="Create Upload Link", annotations=ADDS)
     @admits(OperationKind.REMEMBER)
     async def media_upload_link(kind: str = "image", note: str = "", profile_id: str = "") -> dict:
         """Get a one-time link the person opens to add a picture or a PDF from their own device.

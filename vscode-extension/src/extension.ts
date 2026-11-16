@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { slmAlreadyConfigured } from './configured';
+import { scheduleStarAsk } from './starAsk';
 
 const PROVIDER_ID = 'qualixar.superlocalmemory';
 const INSTALL_URL = 'https://superlocalmemory.com';
@@ -143,6 +144,13 @@ export function activate(context: vscode.ExtensionContext): void {
         changed.fire();
       }
     }),
+    // Ask for a GitHub star once ever, a little after startup (starAsk.ts).
+    { dispose: scheduleStarAsk({
+      getFlag: (key) => context.globalState.get<boolean>(key),
+      setFlag: (key, value) => context.globalState.update(key, value),
+      showMessage: (message, ...actions) => vscode.window.showInformationMessage(message, ...actions),
+      openUrl: (url) => vscode.env.openExternal(vscode.Uri.parse(url)),
+    }) },
   );
 }
 

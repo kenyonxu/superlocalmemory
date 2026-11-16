@@ -26,6 +26,7 @@ from types import ModuleType
 from typing import Any, Generator, NoReturn
 
 from superlocalmemory.storage import erasure_derived, projection_outbox, store_signature
+from superlocalmemory.storage import write_generation as _write_generation
 from superlocalmemory.storage.correction_cases import SAVED_SUCCESSOR_PARAMS, SAVED_SUCCESSOR_SQL
 from superlocalmemory.storage.embedding_codec import (
     decode_embedding,
@@ -33,13 +34,13 @@ from superlocalmemory.storage.embedding_codec import (
     encode_embedding,
     encode_float_vector,
 )
-from superlocalmemory.storage.event_time import valid_from as _event_start
 from superlocalmemory.storage.erasure_visibility import (
     aggregate_erasure_clause_for_db,
     erasure_clause,
     has_tombstones,
     memory_erasure_clause_for_db,
 )
+from superlocalmemory.storage.event_time import valid_from as _event_start
 from superlocalmemory.storage.memory_kinds import KIND_COLUMNS
 from superlocalmemory.storage.models import (
     AtomicFact,
@@ -59,8 +60,6 @@ from superlocalmemory.storage.models import (
 )
 from superlocalmemory.storage.read_connection import read_only_snapshot
 from superlocalmemory.storage.write_lock import get_write_lock
-
-from superlocalmemory.storage import write_generation as _write_generation
 
 logger = logging.getLogger(__name__)
 
@@ -1583,6 +1582,15 @@ class DatabaseManager:
         )
         return [self._row_to_fact(r) for r in rows]
 
+    def get_session_facts(self, profile_id: str, session_id: str) -> list[AtomicFact]:
+        """One session's visible facts, newest first, read through idx_facts_session."""
+        rows = self.execute(
+            "SELECT * FROM atomic_facts WHERE profile_id = ? AND session_id = ?"
+            f"{self.visible_fact_clause()} ORDER BY created_at DESC",
+            (profile_id, session_id),
+        )
+        return [self._row_to_fact(r) for r in rows]
+
     def get_external_visible_facts(
         self,
         profile_id: str,
@@ -1914,12 +1922,32 @@ class DatabaseManager:
         )
         return entity.entity_id
 
+    # COLLATE NOCASE, not LOWER(): it is the same ASCII case fold, and it is the
+    # one idx_entities_name_lower is built on. LOWER(canonical_name) made every
+    # lookup scan the profile's entities (#306: ~3 s per 45 lookups at 38k).
+    _ENTITY_BY_NAME_SQL = (
+        "SELECT * FROM canonical_entities "
+        "WHERE profile_id = ? AND canonical_name = ? COLLATE NOCASE"
+    )
+
     def get_entity_by_name(self, name: str, profile_id: str) -> CanonicalEntity | None:
         """Look up entity by name (case-insensitive)."""
+        return self._entity_row(self.execute(self._ENTITY_BY_NAME_SQL, (profile_id, name)))
+
+    def get_entity_by_id_or_name(self, key: str, profile_id: str) -> CanonicalEntity | None:
+        """An entity by its ID, else by its name (case-insensitive), in one profile.
+
+        Facts store canonical entity IDs (#306), while older rows may hold
+        names; the ID is tried first because it is the primary key.
+        """
         rows = self.execute(
-            "SELECT * FROM canonical_entities WHERE profile_id = ? AND LOWER(canonical_name) = LOWER(?)",
-            (profile_id, name),
+            "SELECT * FROM canonical_entities WHERE entity_id = ? AND profile_id = ?",
+            (key, profile_id),
         )
+        return self._entity_row(rows) or self.get_entity_by_name(key, profile_id)
+
+    @staticmethod
+    def _entity_row(rows: list) -> CanonicalEntity | None:
         if not rows:
             return None
         d = dict(rows[0])

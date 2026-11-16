@@ -42,6 +42,18 @@ DEFAULT_JOURNAL_MODE = "delete"
 #: the daemon.
 SIGNAL_WORKER_JOURNAL_MODE = "wal"
 
+#: The second documented exemption (merge 4.2.19): the mesh coordination
+#: file ``mesh.db`` (mesh/mesh_store.py, upstream 4.2.8). It is a separate
+#: SQLite file next to memory.db whose heartbeat/registration connections
+#: must never queue on the memory writer, and whose salvage path
+#: (test_mesh_store_hardening) reads rows that only exist in the WAL.
+#: Upstream ships it in WAL and its tests assert that; this merge keeps the
+#: mode and moves the DECISION here so the "modes are decided in one place"
+#: invariant (tests/core/test_journal_mode.py) keeps holding. The file is
+#: owned and closed by the daemon itself, like the signal worker's drain
+#: connection above.
+MESH_STORE_JOURNAL_MODE = "wal"
+
 
 def resolve_journal_mode() -> str:
     """Return the journal mode every new connection should request."""
@@ -89,3 +101,14 @@ def apply_signal_worker_journal_mode(conn: sqlite3.Connection) -> str:
     file rather than failing the worker's start.
     """
     return _set_mode(conn, SIGNAL_WORKER_JOURNAL_MODE)
+
+
+def apply_mesh_store_journal_mode(conn: sqlite3.Connection) -> str:
+    """The mesh coordination file's documented WAL exemption.
+
+    See :data:`MESH_STORE_JOURNAL_MODE` (merge 4.2.19). Best-effort by the
+    same rule as :func:`apply_journal_mode`: a mesh.db another connection
+    holds in a different mode is left as it is — the store follows the file
+    rather than failing the daemon's start.
+    """
+    return _set_mode(conn, MESH_STORE_JOURNAL_MODE)

@@ -8,7 +8,7 @@ when_to_use: |
   - "Find stored information about authentication / the database / error handling"
   - "Search for what I said about Y"
   - Automatically before any non-trivial task, to surface prior context
-allowed-tools: recall, search, fetch, expand, list_recent, get_memory_summary, run_view, report_outcome, report_feedback, Bash
+allowed-tools: recall, search, fetch, expand, list_recent, get_memory_summary, run_view, report_outcome, report_feedback, Bash(slm:*)
 ---
 
 # slm-recall — Search & Retrieve Memory
@@ -515,4 +515,4 @@ See `slm-profile`.
 
 ---
 
-*SuperLocalMemory v4.2.6 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.2.19 · Qualixar · AGPL-3.0-or-later*

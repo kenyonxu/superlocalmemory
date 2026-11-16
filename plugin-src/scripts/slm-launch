@@ -96,33 +96,25 @@ _ensure_daemon() {
     "$@" serve start >&2
 }
 
-# The release this plugin tree ships (requirements.txt is stamped every release).
-# Fork identity: the PyPI distribution is mslm-memory (same engine, fork package
-# name), so that is the pin uvx resolves — consistent with requirements.txt.
-_slm_pin() {
-    sed -n 's/^\(mslm-memory==[0-9][0-9A-Za-z.+!-]*\)[[:space:]]*$/\1/p' \
-        "${_SLM_PLUGIN_ROOT}/requirements.txt" 2>/dev/null | head -n 1
-}
-
 # No installed slm and no plugin venv: run this release through uvx. Returns
-# only when it cannot (no uvx, or no pin); otherwise it becomes the server.
+# only when it cannot (no uvx); otherwise it becomes the server. The version is
+# written in literally at build time (scripts/build-plugin.mjs replaces
+# __SLM_RELEASE__): Anthropic's plugin directory refuses a uvx launch whose pin
+# it cannot read, and a pin computed at run time is one it cannot read.
 _slm_run_uvx() {
-    local _pin
     command -v uvx >/dev/null 2>&1 || return 1
-    _pin="$(_slm_pin)"
-    if [ -z "${_pin}" ]; then
-        echo "SLM plugin: not using uvx: no mslm-memory pin in ${_SLM_PLUGIN_ROOT}/requirements.txt." >&2
-        return 1
-    fi
     # PyPI's Linux torch is the CUDA build; macOS and Windows get CPU wheels anyway.
     if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
         export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cpu}"
     fi
-    export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
-    echo "SLM plugin: no installed slm; running ${_pin} through uvx (downloaded once, then cached)." >&2
-    _ensure_daemon uvx --from "${_pin}" slm || \
-        echo "SLM plugin: daemon did not start; the MCP server will retry on first use." >&2
-    exec uvx --from "${_pin}" slm mcp
+    # slm sets its own thread defaults (cli/main.py, mcp/server.py); this
+    # launcher sets nothing else (guarded in tests/test_plugin).
+    echo "SLM plugin: no installed slm; running mslm-memory==__SLM_RELEASE__ through uvx (downloaded once, then cached)." >&2
+    if [ "${_daemon_running}" -ne 1 ]; then
+        uvx --from "mslm-memory==__SLM_RELEASE__" slm serve start >&2 || \
+            echo "SLM plugin: daemon did not start; the MCP server will retry on first use." >&2
+    fi
+    exec uvx --from "mslm-memory==__SLM_RELEASE__" slm mcp
 }
 
 # Opt-in: build the plugin venv now, with the same bootstrap SessionStart runs.
@@ -177,7 +169,7 @@ case "${SLM_LAUNCHER:-auto}:${SLM_CHOICE}" in
             if ! _slm_bootstrap; then
                 slm_not_found_message >&2
                 echo >&2
-                echo "  Or install uv (https://docs.astral.sh/uv/): the plugin then runs SuperLocalMemory through uvx." >&2
+                echo "  Or install uv (Astral's Python package manager): the plugin then runs SuperLocalMemory through uvx." >&2
                 exit 1
             fi
         fi

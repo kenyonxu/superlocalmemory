@@ -22,6 +22,8 @@
 
 **[Install](#install)** · **[See it work](#30-second-example)** · **[Full demo](https://www.youtube.com/watch?v=9Y0wAT07KTc)** · **[Every capability](#everything-slm-does)** · **[Docs](#documentation)** · **[Website](https://www.superlocalmemory.com)**
 
+**⭐ If SuperLocalMemory keeps your agents from guessing, [star the repo](https://github.com/qualixar/superlocalmemory/stargazers). It helps other developers find it.**
+
 <img src="https://raw.githubusercontent.com/qualixar/superlocalmemory/main/docs/assets/gifs/recall-tiers.gif" alt="Recall in the dashboard: a real question gets its answer; a gibberish question gets 'That isn't in SuperLocalMemory.'; a real question memory cannot answer exactly gets the closest memories, labelled" width="820">
 
 
@@ -79,6 +81,8 @@ slm setup
 slm connect claude-code
 slm media enable                  # optional: pictures and documents (about 1.5 GB; needs 16 GB of memory)
 ```
+
+**uv**: `uv tool install --python 3.12 superlocalmemory` installs `slm` as an isolated tool, with nothing to activate; see [Linux install](https://github.com/qualixar/superlocalmemory/blob/main/docs/install-linux.md#isolated-slm-command-with-uv).
 
 **Claude Code plugin:** `claude plugin marketplace add qualixar/superlocalmemory`, then `claude plugin install superlocalmemory@qualixar`. **Codex:** `slm connect codex`, then `slm codex install`.
 
@@ -311,7 +315,7 @@ Engineering controls that support a compliance program, not a certification.
 
 ## MCP memory server: tool profiles
 
-Every app, plugin and extension gets `full` (58 tools: all of memory, SLM-Mesh, optimize, loops) unless you choose otherwise. That fits hosts that cap the total number of MCP tools at about 100, with room for your other servers. To change it for every app at once, run one command and restart your apps:
+Every app, plugin and extension gets `full` (58 tools: all of memory, SLM-Mesh, optimize, loops; 5 more while images are on) unless you choose otherwise. That fits hosts that cap the total number of MCP tools at about 100, with room for your other servers. To change it for every app at once, run one command and restart your apps:
 
 ```bash
 slm tools                # current set, and how many tools each set has
@@ -395,7 +399,7 @@ Cite with [CITATION.cff](https://github.com/qualixar/superlocalmemory/blob/main/
 ## Upgrade
 
 ```bash
-npm update -g superlocalmemory    # or: pipx upgrade superlocalmemory
+npm update -g superlocalmemory    # or: pipx upgrade superlocalmemory, uv tool upgrade superlocalmemory
 slm restart && slm doctor
 slm upgrade-hosts                 # preview plugin and IDE updates; nothing changes until you --apply
 ```
@@ -412,6 +416,10 @@ Upgrades never move or delete memory, and a store update takes a restore point f
 | Intel Mac, 32-bit Windows | No prebuilt install | — |
 
 Python 3.12+, Node 18+ for npm. Pictures and documents need 16 GB of memory.
+
+## Star history
+
+<a href="https://star-history.com/#qualixar/superlocalmemory&Date"><img src="https://api.star-history.com/svg?repos=qualixar/superlocalmemory&type=Date" alt="SuperLocalMemory GitHub star history" width="600"></a>
 
 ## Contributing and license
 

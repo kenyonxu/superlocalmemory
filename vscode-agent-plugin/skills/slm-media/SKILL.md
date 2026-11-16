@@ -9,7 +9,7 @@ when_to_use: |
   - remember_media, remember_document, get_media, media_status or media_upload_link is missing from the tool list
   - "Turn on pictures and documents", slm media status, slm media repair
   - "Connect my Obsidian vault / notes folder" (slm sources)
-allowed-tools: remember_media, remember_document, get_media, media_status, media_upload_link, recall, Bash
+allowed-tools: remember_media, remember_document, get_media, media_status, media_upload_link, recall, Bash(slm:*)
 ---
 
 # slm-media — Pictures, PDFs and Folders
@@ -337,4 +337,4 @@ minutes (previous vectors are kept) and let them decide.
 
 ---
 
-*SuperLocalMemory v4.2.6 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.2.19 · Qualixar · AGPL-3.0-or-later*

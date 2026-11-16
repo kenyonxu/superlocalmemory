@@ -21,8 +21,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Callable
 
-from mcp.types import ToolAnnotations
-
+from superlocalmemory.mcp.tool_hints import READ_ONLY
 from superlocalmemory.retrieval.hosted_redaction import redact_for_hosted_judge
 
 logger = logging.getLogger(__name__)
@@ -76,6 +75,16 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _injection_on() -> bool:
+    """``injection.enabled`` covers prestage_context (InjectionConfig). Unreadable = on."""
+    try:
+        from superlocalmemory.hooks import rules_engine
+
+        return rules_engine.load().should_recall("prestage")
+    except Exception:  # noqa: BLE001 - a bad config never breaks the tool
+        return True
+
+
 def _cap_memory(memory: dict, *, max_text_bytes: int = 2048) -> dict:
     """Ensure each memory is bounded and redacted.
 
@@ -117,6 +126,14 @@ def prestage_context(
     Normalized at entry; invalid input is silently ignored (background tool).
     3-arg recall_fn callers are supported via TypeError fallback (Decision A2).
     """
+    if not _injection_on():
+        return {
+            "error": "injection_disabled",
+            "memories": [],
+            "generated_at": _iso_now(),
+            "limit": limit,
+            "truncated_count": 0,
+        }
     _limiter = limiter or _DEFAULT_LIMITER
     if not _limiter.allow(session_id):
         return {
@@ -212,7 +229,7 @@ def register_prestage_tool(server, recall_fn: PrestageRecallFn,
     # Module-level pure function (avoid UnboundLocalError from nested def name).
     _pure_prestage = globals()["prestage_context"]
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Prestage Context", annotations=READ_ONLY)
     async def prestage_context(  # noqa: F811 — MCP tool surface name
         query: str,
         limit: int = 5,

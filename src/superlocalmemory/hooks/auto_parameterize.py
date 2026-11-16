@@ -13,15 +13,15 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from superlocalmemory.core.config import ParameterizationConfig
     from superlocalmemory.parameterization.pattern_extractor import PatternExtractor
-    from superlocalmemory.parameterization.soft_prompt_generator import SoftPromptGenerator
     from superlocalmemory.parameterization.prompt_injector import PromptInjector
     from superlocalmemory.parameterization.prompt_lifecycle import PromptLifecycleManager
-    from superlocalmemory.core.config import ParameterizationConfig
+    from superlocalmemory.parameterization.soft_prompt_generator import SoftPromptGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +89,14 @@ class AutoParameterizeHook:
         if not prompts:
             return {"status": "no_prompts", "patterns": len(patterns)}
 
-        # Step 3: Store prompts
-        stored = self._injector.store_prompts(prompts)
+        # Step 3: Store prompts. A failure here must not skip step 4: it once
+        # ended every run (an unstorable category), so no stale prompt was ever
+        # retired, and it was only logged at debug level by the caller.
+        try:
+            stored = self._injector.store_prompts(prompts)
+        except Exception as exc:  # noqa: BLE001 - the review below still runs
+            logger.warning("Soft prompts not stored for %s: %s", profile_id, exc)
+            stored = 0
 
         # Step 4: Run lifecycle review
         lifecycle_stats = self._lifecycle.run_lifecycle_review(profile_id)

@@ -212,9 +212,12 @@ def dashboard(request: Request):
             "projection_queue_depth": queue_depth,
             **counts,
         }
-        payload.update(dashboard_mode_fields(config.mode))
+        # #303: the mode's default, made true to the endpoints actually configured.
+        payload.update(dashboard_mode_fields(
+            config.mode, getattr(config, "embedding", None), getattr(config, "llm", None),
+        ))
         return payload
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -224,8 +227,9 @@ def dashboard(request: Request):
 def get_mode(request: Request):
     """Get current mode, provider, model — single source of truth for UI."""
     try:
-        from superlocalmemory.core.config import SLMConfig
         from urllib.parse import urlparse
+
+        from superlocalmemory.core.config import SLMConfig
         config = getattr(request.app.state, "config", None) or SLMConfig.load()
         current = config.mode.value
         # SEC-L-01: expose only the endpoint HOST, not the full URL. A full
@@ -244,7 +248,7 @@ def get_mode(request: Request):
                 "cross_encoder": config.retrieval.reranker_enabled() if hasattr(config, 'retrieval') else False,
             },
         }
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -287,8 +291,8 @@ async def set_mode(request: Request):
             return JSONResponse({"error": "Invalid mode. Use a, b, or c."}, status_code=400)
 
         from superlocalmemory.core.config import SLMConfig
-        from superlocalmemory.storage.models import Mode
         from superlocalmemory.server.routes.helpers import log_mode_change
+        from superlocalmemory.storage.models import Mode
         old_config = SLMConfig.load()
         old_mode = old_config.mode.value
 
@@ -304,6 +308,11 @@ async def set_mode(request: Request):
             _refusal = _mode_c_quick_switch_refusal(old_config.llm)
             if _refusal is not None:
                 return JSONResponse(_refusal, status_code=400)
+
+        # 4.2.9: keep the mode being left in its own mode_<x>.json first, as
+        # `slm mode` does; otherwise a later CLI switch back loads a stale
+        # profile and reverts the model or embedder chosen in that mode.
+        old_config.save(SLMConfig._mode_config_path(old_config.base_dir, old_config.mode))
 
         # Apply new mode's structural presets (retrieval, math, channel_weights)
         # by building a fresh template, then graft them onto the loaded config so
@@ -332,7 +341,7 @@ async def set_mode(request: Request):
         # model never changes here (POST /mode/set and PUT /embedding/config do that,
         # as a background re-index), so there is never anything to re-index.
         return {"success": True, "mode": new_mode, "needs_reindex": False, "message": ""}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -474,9 +483,9 @@ async def set_full_config(request: Request):
         body = await request.json()
         if not isinstance(body, dict):
             return JSONResponse({"error": "Request body must be a JSON object"}, status_code=400)
-        from superlocalmemory.core.config import SLMConfig, EmbeddingConfig
-        from superlocalmemory.storage.models import Mode
+        from superlocalmemory.core.config import EmbeddingConfig, SLMConfig
         from superlocalmemory.server.routes.helpers import log_mode_change
+        from superlocalmemory.storage.models import Mode
 
         config = SLMConfig.load()
         old_mode = config.mode.value
@@ -490,8 +499,12 @@ async def set_full_config(request: Request):
             return value.strip() or None
 
         new_mode = (_nonblank("mode") or config.mode.value).lower()
+        if new_mode != old_mode:
+            # 4.2.9: keep the mode being left in its mode_<x>.json, as `slm mode`
+            # does, so switching back never restores a stale profile.
+            config.save(SLMConfig._mode_config_path(config.base_dir, config.mode))
         provider_input = _nonblank("provider")
-        model_input = _nonblank("model")
+        _nonblank("model")  # validation only (raises on non-string); value applied via apply_settings_update
         api_key_input = _nonblank("api_key")
         base_url_input = _nonblank("base_url")
         endpoint_input = _nonblank("endpoint")
@@ -595,7 +608,8 @@ async def set_full_config(request: Request):
                 api_endpoint=body.get("embedding_endpoint", ""),
                 api_key=body.get("embedding_key", ""),
                 model_name=_new_model,
-                dimension=_new_dim or _old_emb.dimension,
+                dimension=_new_dim or _inherited_embedding_dimension(
+                    _old_emb, _new_provider, _new_model),
                 # Not naming these reset them to defaults, so every embedding
                 # save from the dashboard silently put the local model back to
                 # whatever ships — the exact defect the other route had.
@@ -607,9 +621,12 @@ async def set_full_config(request: Request):
                 api_version=_old_emb.api_version,
                 deployment_name=_old_emb.deployment_name,
             )
+            _incomplete = _incomplete_endpoint_response(_new_emb)  # #302
+            if _incomplete is not None:
+                return _incomplete
             # 4.1.22: a new space is re-indexed in the background; the rest applies now.
             from superlocalmemory.server.routes.embedding_reindex import queue_if_new_space
-            _queued = queue_if_new_space(request, _old_emb, _new_emb, force=bool(body.get("force")))
+            _queued =queue_if_new_space(request, _old_emb, _new_emb, force=bool(body.get("force")))
             if _queued is not None and _queued.status_code != 202:
                 return _queued
             _refusal = None if _queued is not None or bool(body.get("force")) or getattr(
@@ -663,7 +680,7 @@ async def set_full_config(request: Request):
         return {**_saved, **_note}
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -679,6 +696,10 @@ def get_embedding_config(request: Request):
         # that live truth, never silently replace it with disk defaults.
         config = getattr(request.app.state, "config", None) or SLMConfig.load()
         emb = config.embedding
+        from superlocalmemory.core.data_locality import (
+            effective_data_locality,
+            is_local_endpoint,
+        )
         return {
             "provider": emb.provider,
             "model_name": emb.model_name,
@@ -687,9 +708,46 @@ def get_embedding_config(request: Request):
             "has_key": bool(emb.api_key),
             "is_openai_compatible": emb.is_openai_compatible,
             "mode": config.mode.value,
+            # #303: a custom endpoint is allowed in any mode, so say whether it
+            # is on this computer or network and what that does to the mode's claim.
+            "endpoint_is_local": (
+                is_local_endpoint(emb.api_endpoint) if emb.is_openai_compatible else True
+            ),
+            "data_stays_local": effective_data_locality(
+                config.mode, emb, config.llm).stays_local,
         }
-    except Exception as e:
+    except Exception:
         return _internal_error()
+
+
+def _incomplete_endpoint_response(emb):
+    """The 400 for an OpenAI-compatible endpoint saved without a model or a width (#302).
+
+    Both save doors and the re-index target ask ``core.embedding_endpoint_check``,
+    so one config cannot get different answers from different doors.
+    """
+    from superlocalmemory.core.embedding_endpoint_check import (
+        INCOMPLETE_ENDPOINT_CODE,
+        incomplete_endpoint_error,
+    )
+
+    message = incomplete_endpoint_error(emb)
+    if message is None:
+        return None
+    return JSONResponse({"error": message, "code": INCOMPLETE_ENDPOINT_CODE}, status_code=400)
+
+
+def _inherited_embedding_dimension(old_emb, new_provider, new_model) -> int:
+    """The width a save that names none keeps from the live config.
+
+    A custom endpoint keeps it only while it is the same endpoint model: the
+    local bundle's 768 is not the width of whatever the endpoint serves.
+    """
+    if new_provider != "openai":
+        return old_emb.dimension
+    if old_emb.is_openai_compatible and new_model == old_emb.model_name:
+        return old_emb.dimension
+    return 0
 
 
 def _refuse_incompatible_embedding(
@@ -779,7 +837,7 @@ async def set_embedding_config(request: Request):
     require_global_manage(request)
     try:
         body = await request.json()
-        from superlocalmemory.core.config import SLMConfig, EmbeddingConfig
+        from superlocalmemory.core.config import EmbeddingConfig, SLMConfig
         config = getattr(request.app.state, "config", None) or SLMConfig.load()
 
         new_model = body.get("model_name", config.embedding.model_name)
@@ -789,8 +847,15 @@ async def set_embedding_config(request: Request):
                 body.get("provider", ""), new_model, config.embedding.provider)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
-        new_dim = int(body.get("dimension", config.embedding.dimension) or 768)
-        if not (64 <= new_dim <= 8192):
+        # A blank width is 768 only for the providers that ship at 768; an
+        # endpoint's width is its own and is asked for, never assumed (#302).
+        new_dim = (
+            int(body["dimension"] or 0) if "dimension" in body
+            else _inherited_embedding_dimension(config.embedding, new_provider, new_model)
+        )
+        if not new_dim and new_provider != "openai":
+            new_dim = 768
+        if new_dim and not (64 <= new_dim <= 8192):
             return JSONResponse({"error": f"Dimension must be 64-8192, got {new_dim}"}, status_code=400)
         new_endpoint = body.get("api_endpoint", config.embedding.api_endpoint)
         new_key = body.get("api_key", config.embedding.api_key)
@@ -821,9 +886,12 @@ async def set_embedding_config(request: Request):
             api_version=old_emb.api_version,
             deployment_name=old_emb.deployment_name,
         )
+        incomplete = _incomplete_endpoint_response(new_emb)  # #302
+        if incomplete is not None:
+            return incomplete
         # 4.1.22: a new embedding space is re-indexed in the background (202 + job).
         from superlocalmemory.server.routes.embedding_reindex import queue_if_new_space
-        queued = queue_if_new_space(request, old_emb, new_emb, force=bool(body.get("force")))
+        queued =queue_if_new_space(request, old_emb, new_emb, force=bool(body.get("force")))
         if queued is not None:
             return queued
         refusal = None if bool(body.get("force")) or getattr(request.app.state, "embedding_reindex", None) else (
@@ -848,7 +916,7 @@ async def set_embedding_config(request: Request):
             "dimension": new_dim,
             **note,
         }
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -860,7 +928,7 @@ def get_scope_config(request: Request):
 
         config = getattr(request.app.state, "config", None) or SLMConfig.load()
         return {"success": True, **config.scope.as_dict()}
-    except Exception as exc:
+    except Exception:
         return _internal_error()
 
 
@@ -872,7 +940,7 @@ async def set_scope_config(request: Request):
     require_global_manage(request)
     try:
         body = await request.json()
-        from superlocalmemory.core.config import SLMConfig, ScopeConfig
+        from superlocalmemory.core.config import ScopeConfig, SLMConfig
 
         config = SLMConfig.load()
         current = config.scope
@@ -900,7 +968,7 @@ async def set_scope_config(request: Request):
         )
         await _apply_runtime_config(request, config, mode_change=False)
         return {"success": True, **config.scope.as_dict()}
-    except Exception as exc:
+    except Exception:
         return _internal_error()
 
 
@@ -1013,7 +1081,7 @@ async def embed_texts(request: Request):
             lambda: embed_with_prompt(engine._embedder, texts, prompt),
         )
         return {"embeddings": embeddings}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -1092,7 +1160,10 @@ async def test_provider(request: Request):
                 found = any(m == model or m.split(":")[0] == model_base for m in models) if model else len(models) > 0
                 return {
                     "success": found,
-                    "message": f"Ollama OK, {len(models)} models" + (f", '{model}' available" if found and model else ""),
+                    "message": (
+                        f"Ollama OK, {len(models)} models"
+                        + (f", '{model}' available" if found and model else "")
+                    ),
                 }
 
         if provider == "openrouter":
@@ -1120,7 +1191,11 @@ async def test_provider(request: Request):
                     base = f"{base}/chat/completions"
                 with httpx.Client(timeout=httpx.Timeout(10.0)) as c:
                     # Probe with a minimal chat request (models list not universal on local servers)
-                    probe = {"model": body.get("model", "test"), "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+                    probe = {
+                        "model": body.get("model", "test"),
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1,
+                    }
                     resp = c.post(base, headers=headers_test, json=probe)
                     if resp.status_code in (200, 400, 422):
                         return {"success": True, "message": f"Custom endpoint reachable (HTTP {resp.status_code})"}
@@ -1146,7 +1221,7 @@ async def test_provider(request: Request):
         return {"success": False, "error": "Cannot connect — is the service running?"}
     except httpx.HTTPStatusError as e:
         return {"success": False, "error": f"HTTP {e.response.status_code}: Invalid key or endpoint"}
-    except Exception as e:
+    except Exception:
         logger.exception("verify_key failed")
         return {"success": False, "error": "internal error"}
 
@@ -1177,7 +1252,7 @@ def list_providers():
     try:
         from superlocalmemory.core.config import SLMConfig
         return {"providers": SLMConfig.provider_presets()}
-    except Exception as exc:
+    except Exception:
         logger.exception("list_providers failed")
         return {"error": "could not load provider list", "providers": []}
 
@@ -1197,7 +1272,7 @@ def get_provider():
             "api_key_masked": masked,
             "has_key": bool(key),
         }
-    except Exception as exc:
+    except Exception:
         logger.exception("get_provider failed")
         return {"error": "could not load configuration", "provider": "unknown"}
 
@@ -1207,8 +1282,8 @@ async def set_provider(request: Request):
     """Set LLM provider. Body: {"provider": "openai", "api_key": "...", "model": "..."}"""
     # Swapping the provider + API key redirects all LLM traffic (prompt/output
     # interception risk) — admin-only, on top of mutation auth.
-    from superlocalmemory.server.route_mutations import authorize_route_mutation
     from superlocalmemory.server.rbac_enforce import require_global_manage
+    from superlocalmemory.server.route_mutations import authorize_route_mutation
     _auth = authorize_route_mutation(request, operation="update",
                                      source_agent_id="http-set-provider")
     require_global_manage(request)
@@ -1219,7 +1294,7 @@ async def set_provider(request: Request):
         model = body.get("model", "")
         base_url = body.get("base_url", "")
 
-        from superlocalmemory.core.config import SLMConfig, LLMConfig
+        from superlocalmemory.core.config import LLMConfig, SLMConfig
         config = SLMConfig.load()
 
         # Use preset base_url if not provided
@@ -1240,7 +1315,7 @@ async def set_provider(request: Request):
         config.save()
 
         return {"success": True, "provider": provider, "model": model}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -1374,7 +1449,7 @@ async def recall_trace(request: Request):
             **recall_response_metadata(response),
             "answer_check": answer_check_block(response),
         }
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -1384,7 +1459,6 @@ def _record_learning_signals(query: str, results: list, profile_id: str = "") ->
     ``profile_id`` is the workspace the recall ran on; signals are filed there.
     """
     from superlocalmemory.core.config import SLMConfig
-
     from superlocalmemory.infra.data_root import canonical_data_root
     slm_dir = canonical_data_root()
     config = SLMConfig.load()
@@ -1426,8 +1500,8 @@ def trust_dashboard(request: Request):
     """Trust overview: per-agent scores, alerts. Queries DB directly."""
     try:
         from superlocalmemory.core.config import SLMConfig
-        from superlocalmemory.storage.database import DatabaseManager
         from superlocalmemory.storage import schema as _schema
+        from superlocalmemory.storage.database import DatabaseManager
         config = SLMConfig.load()
         pid = config.active_profile
 
@@ -1467,7 +1541,7 @@ def trust_dashboard(request: Request):
             "total": len(agents),
             "profile": pid,
         }
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -1509,7 +1583,7 @@ def math_health(request: Request):
             "overall": _status,
             "note": "config-derived; not a live runtime probe",
         }
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -1519,11 +1593,11 @@ def math_health(request: Request):
 def get_auto_capture_config():
     """Get auto-capture configuration."""
     try:
-        from superlocalmemory.hooks.rules_engine import RulesEngine
         from superlocalmemory.core.config import DEFAULT_BASE_DIR
+        from superlocalmemory.hooks.rules_engine import RulesEngine
         rules = RulesEngine(config_path=DEFAULT_BASE_DIR / "config.json")
         return {"config": rules.get_capture_config()}
-    except Exception as exc:
+    except Exception:
         logger.exception("get_auto_capture_config failed")
         return {"error": "internal error", "config": {}}
 
@@ -1534,15 +1608,15 @@ async def set_auto_capture_config(request: Request):
     _require_manage(request)
     try:
         body = await request.json()
-        from superlocalmemory.hooks.rules_engine import RulesEngine
         from superlocalmemory.core.config import DEFAULT_BASE_DIR
+        from superlocalmemory.hooks.rules_engine import RulesEngine
         config_path = DEFAULT_BASE_DIR / "config.json"
         rules = RulesEngine(config_path=config_path)
         for key, value in body.items():
             rules.update_rule("auto_capture", key, value)
         rules.save(config_path)
         return {"success": True, "config": rules.get_capture_config()}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -1550,11 +1624,11 @@ async def set_auto_capture_config(request: Request):
 def get_auto_recall_config():
     """Get auto-recall configuration."""
     try:
-        from superlocalmemory.hooks.rules_engine import RulesEngine
         from superlocalmemory.core.config import DEFAULT_BASE_DIR
+        from superlocalmemory.hooks.rules_engine import RulesEngine
         rules = RulesEngine(config_path=DEFAULT_BASE_DIR / "config.json")
         return {"config": rules.get_recall_config()}
-    except Exception as exc:
+    except Exception:
         logger.exception("get_auto_recall_config failed")
         return {"error": "internal error", "config": {}}
 
@@ -1565,15 +1639,15 @@ async def set_auto_recall_config(request: Request):
     _require_manage(request)
     try:
         body = await request.json()
-        from superlocalmemory.hooks.rules_engine import RulesEngine
         from superlocalmemory.core.config import DEFAULT_BASE_DIR
+        from superlocalmemory.hooks.rules_engine import RulesEngine
         config_path = DEFAULT_BASE_DIR / "config.json"
         rules = RulesEngine(config_path=config_path)
         for key, value in body.items():
             rules.update_rule("auto_recall", key, value)
         rules.save(config_path)
         return {"success": True, "config": rules.get_recall_config()}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -1591,6 +1665,39 @@ _RUNTIME_CONFIG_FIELDS = (
     ("injection", "core_block_enabled", "bool", None, None),
     ("injection", "core_block_max_facts", "int", 0, 50),
 )
+
+
+def _persist_runtime_updates(live, updates: dict[str, dict]) -> None:
+    """Write only the fields this request changed (4.2.14).
+
+    Saving the whole daemon config wrote its start-up copy of every section,
+    so a dashboard change undid anything another writer (`slm config set`,
+    the CLI) had put in config.json since. A locked, atomic read-modify-write
+    of just these fields keeps both. With no config.json yet, the full save
+    still creates it, exactly as before: the existence check and that save
+    run under the config lock, so a writer creating the file in between is
+    never overwritten (the lock is re-entrant for save()'s own take).
+    """
+    from superlocalmemory.infra.config_lock import config_file_lock
+    from superlocalmemory.server.config_file import update_config
+
+    def _apply(data: dict) -> None:
+        for section, changes in updates.items():
+            current = data.get(section)
+            data[section] = {**(current if isinstance(current, dict) else {}), **changes}
+
+    path = Path(live.base_dir) / "config.json"
+    with config_file_lock(path):
+        if path.exists():
+            written = update_config(path, _apply)
+            # The file now holds this object's change: record that, so a later
+            # full save of this object does not count the field as its own
+            # change again and put it back over a newer `slm config set`.
+            record = getattr(live, "_record_sync", None)
+            if callable(record):
+                record(path, written, from_load=False)
+        else:
+            live.save(mode_change=False)
 
 
 def _runtime_config_snapshot(config) -> dict:
@@ -1631,6 +1738,7 @@ async def set_runtime_config(request: Request):
     _require_manage(request)
     try:
         import dataclasses as _dc
+
         from superlocalmemory.core.config import SLMConfig
 
         body = await request.json()
@@ -1691,7 +1799,7 @@ async def set_runtime_config(request: Request):
                 # assigning the attribute is an atomic reference swap.
                 setattr(cfg, section, _dc.replace(sec, **changes))
         request.app.state.config = live
-        live.save(mode_change=False)  # durable across restart
+        _persist_runtime_updates(live, updates)  # durable across restart
         return {"success": True, "config": _runtime_config_snapshot(live)}
     except Exception:
         return _internal_error()
@@ -1706,7 +1814,7 @@ def ide_status():
         from superlocalmemory.hooks.ide_connector import IDEConnector
         connector = IDEConnector()
         return {"ides": connector.get_status()}
-    except Exception as exc:
+    except Exception:
         logger.exception("ide_status failed")
         return {"error": "internal error", "ides": []}
 
@@ -1727,7 +1835,7 @@ async def ide_connect(request: Request):
         else:
             results = connector.connect_all()
             return {"results": results}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -1737,15 +1845,15 @@ async def ide_connect(request: Request):
 def learning_signals():
     """Get zero-cost learning signal statistics."""
     try:
-        from superlocalmemory.learning.signals import LearningSignals
         from superlocalmemory.core.config import SLMConfig
+        from superlocalmemory.learning.signals import LearningSignals
         from superlocalmemory.server.routes.helpers import DB_PATH
         learning_db = DB_PATH.parent / "learning.db"
         signals = LearningSignals(learning_db)
         config = SLMConfig.load()
         pid = config.active_profile
         return {"success": True, **signals.get_signal_stats(pid)}
-    except Exception as exc:
+    except Exception:
         logger.exception("learning_signals failed")
         return {"success": False, "error": "internal error"}
 
@@ -1760,12 +1868,13 @@ async def run_consolidation(request: Request):
         # (online _run_shadow_cycle or legacy cold-start); importing lightgbm
         # in the torch-warm daemon loads a second libomp and SIGSEGVs it (see
         # lightgbm_subprocess module docstring). Isolation is the fix.
+        from fastapi.concurrency import run_in_threadpool
+
+        from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.learning.lightgbm_subprocess import (
             run_consolidation_isolated,
         )
-        from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.server.routes.helpers import DB_PATH
-        from fastapi.concurrency import run_in_threadpool
 
         config = SLMConfig.load()
         learning_db = DB_PATH.parent / "learning.db"
@@ -1798,7 +1907,7 @@ async def run_consolidation(request: Request):
         return {"success": True, **stats}
     except HTTPException:
         raise
-    except Exception as exc:
+    except Exception:
         logger.exception("run_consolidation failed")
         return {"success": False, "error": "internal error"}
 
@@ -1809,7 +1918,7 @@ def hooks_status():
     try:
         from superlocalmemory.hooks.claude_code_hooks import check_status
         return {"success": True, **check_status()}
-    except Exception as exc:
+    except Exception:
         logger.exception("hooks_status failed")
         return {"success": False, "error": "internal error"}
 
@@ -1875,7 +1984,7 @@ def get_auto_invoke_config(request: Request):
             "invocation_count": persisted.get("invocation_count", 0),
             "last_invocation": persisted.get("last_invocation", None),
         }
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -1915,7 +2024,7 @@ async def set_auto_invoke_config(request: Request):
         _save_auto_invoke_json(updated)
 
         return updated
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -1931,8 +2040,9 @@ def get_associations(
     """Get association edges for a profile with content previews."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3
+
+        from superlocalmemory.server.routes.helpers import DB_PATH
 
         if not DB_PATH.exists():
             return {"edges": [], "total": 0}
@@ -1991,7 +2101,7 @@ def get_associations(
             })
 
         return {"edges": edges, "total": total}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2002,8 +2112,9 @@ def get_association_stats(request: Request, profile: str = ""):
     """Get association graph statistics."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3
+
+        from superlocalmemory.server.routes.helpers import DB_PATH
 
         if not DB_PATH.exists():
             return {
@@ -2095,7 +2206,7 @@ def get_association_stats(request: Request, profile: str = ""):
             "avg_weight": avg_weight,
             "top_connected_facts": top_facts,
         }
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2106,9 +2217,10 @@ def get_consolidation_status(request: Request, profile: str = ""):
     """Get consolidation status and last run results."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import DB_PATH
-        from superlocalmemory.core.config import SLMConfig
         import sqlite3
+
+        from superlocalmemory.core.config import SLMConfig
+        from superlocalmemory.server.routes.helpers import DB_PATH
 
         config = SLMConfig.load()
         cons_cfg = config.consolidation
@@ -2182,7 +2294,7 @@ def get_consolidation_status(request: Request, profile: str = ""):
 
         conn.close()
         return result
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2241,7 +2353,7 @@ async def trigger_consolidation(request: Request):
         return {"success": True, **result}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2252,9 +2364,10 @@ def get_core_memory(request: Request, profile: str = ""):
     """Get all Core Memory blocks for a profile."""
     pid = _resolve_profile(request, profile)
     try:
+        import sqlite3
+
         from superlocalmemory.server.routes.helpers import DB_PATH
         from superlocalmemory.storage.erasure_visibility import aggregate_erasure_clause
-        import sqlite3
 
         if not DB_PATH.exists():
             return {"blocks": [], "total_chars": 0, "char_limit": 2000}
@@ -2291,7 +2404,7 @@ def get_core_memory(request: Request, profile: str = ""):
             })
 
         return {"blocks": blocks, "total_chars": total_chars, "char_limit": 2000}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2312,10 +2425,11 @@ async def update_core_memory_block(block_id: str, request: Request):
                 status_code=400,
             )
 
+        from datetime import datetime, timezone
+
+        from superlocalmemory.memory_core import prepare_user_text
         from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile
         from superlocalmemory.storage.memory_write import memory_write
-        from datetime import datetime, timezone
-        from superlocalmemory.memory_core import prepare_user_text
 
         # An edited block is user text: prepared like a save.
         content = prepare_user_text(
@@ -2373,7 +2487,7 @@ async def update_core_memory_block(block_id: str, request: Request):
         return updated_dict
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2384,9 +2498,10 @@ def get_vector_store_status(request: Request, profile: str = ""):
     """Get VectorStore health and statistics."""
     pid = _resolve_profile(request, profile)
     try:
+        import sqlite3  # noqa: F401
+
         from superlocalmemory.core.config import SLMConfig
         from superlocalmemory.server.routes.helpers import DB_PATH
-        import sqlite3  # noqa: F401
 
         config = SLMConfig.load()
 
@@ -2422,7 +2537,7 @@ def get_vector_store_status(request: Request, profile: str = ""):
                 pass
 
         return result
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2446,8 +2561,9 @@ def forgetting_stats(request: Request, profile: str = ""):
     """Get memory retention zone distribution."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3 as _sqlite3
+
+        from superlocalmemory.server.routes.helpers import DB_PATH
 
         zones = {"active": 0, "warm": 0, "cold": 0, "archive": 0, "forgotten": 0}
         total = 0
@@ -2477,7 +2593,7 @@ def forgetting_stats(request: Request, profile: str = ""):
 
         conn.close()
         return {"total": total, "zones": zones}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2559,7 +2675,7 @@ async def run_forgetting(request: Request):
 
                 from superlocalmemory.core.lifecycle_state import reconcile_profile_lifecycle
                 reconcile_profile_lifecycle(conn, pid)
-        except Exception as exc:
+        except Exception:
             logger.exception("run_forgetting decay failed")
             return {"success": False, "error": "internal error"}
 
@@ -2567,7 +2683,7 @@ async def run_forgetting(request: Request):
         return {"success": True, "facts_decayed": updated, "profile": pid}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2578,8 +2694,9 @@ def quantization_stats(request: Request, profile: str = ""):
     """Get embedding quantization tier distribution."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3 as _sqlite3
+
+        from superlocalmemory.server.routes.helpers import DB_PATH
 
         tiers = {"float32": 0, "int8": 0, "polar4": 0, "polar2": 0}
         total = 0
@@ -2630,7 +2747,7 @@ def quantization_stats(request: Request, profile: str = ""):
 
         conn.close()
         return {"total": total, "tiers": tiers, "compression_ratio": compression_ratio}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2641,8 +2758,9 @@ def ccq_blocks(request: Request, profile: str = "", limit: int = 50):
     """Get CCQ consolidated blocks."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3 as _sqlite3
+
+        from superlocalmemory.server.routes.helpers import DB_PATH
 
         if not DB_PATH.exists():
             return {"blocks": [], "total": 0}
@@ -2690,7 +2808,7 @@ def ccq_blocks(request: Request, profile: str = "", limit: int = 50):
 
         conn.close()
         return {"blocks": blocks, "total": total}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2701,8 +2819,9 @@ def get_soft_prompts(request: Request, profile: str = ""):
     """Get active soft prompt templates."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3 as _sqlite3
+
+        from superlocalmemory.server.routes.helpers import DB_PATH
 
         if not DB_PATH.exists():
             return {"prompts": [], "total": 0, "total_tokens": 0}
@@ -2743,7 +2862,7 @@ def get_soft_prompts(request: Request, profile: str = ""):
 
         conn.close()
         return {"prompts": prompts, "total": len(prompts), "total_tokens": total_tokens}
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2789,7 +2908,7 @@ def process_health(request: Request):
             "memory_mb": memory_mb,
             "healthy": processes["parent"]["status"] != "dead",
         }
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2807,8 +2926,9 @@ def get_graph_communities(request: Request, profile: str = ""):
     """
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3
+
+        from superlocalmemory.server.routes.helpers import DB_PATH
 
         if not DB_PATH.exists():
             return {"communities": [], "total": 0}
@@ -2923,7 +3043,7 @@ def get_graph_communities(request: Request, profile: str = ""):
         conn.close()
         return {"communities": communities, "total": len(communities)}
 
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2931,10 +3051,10 @@ def get_graph_communities(request: Request, profile: str = ""):
 async def run_community_detection(request: Request):
     """Trigger community detection manually (runs GraphAnalyzer)."""
     try:
-        from superlocalmemory.server.routes.helpers import get_active_profile, DB_PATH
-        from superlocalmemory.storage.database import DatabaseManager
-        from superlocalmemory.storage import schema as _schema
         from superlocalmemory.core.graph_analyzer import GraphAnalyzer
+        from superlocalmemory.server.routes.helpers import DB_PATH, get_active_profile
+        from superlocalmemory.storage import schema as _schema
+        from superlocalmemory.storage.database import DatabaseManager
 
         pid = get_active_profile()
         _require_manage_for_profile(request, pid)
@@ -2953,7 +3073,7 @@ async def run_community_detection(request: Request):
         return {"success": True, **result}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -2962,8 +3082,9 @@ def v33_overview(request: Request, profile: str = ""):
     """Get SLM 3.3 feature overview -- all new capabilities at a glance."""
     pid = _resolve_profile(request, profile)
     try:
-        from superlocalmemory.server.routes.helpers import DB_PATH
         import sqlite3 as _sqlite3
+
+        from superlocalmemory.server.routes.helpers import DB_PATH
 
         overview: dict = {
             "version": "3.3",
@@ -3085,7 +3206,7 @@ def v33_overview(request: Request, profile: str = ""):
 
         conn.close()
         return overview
-    except Exception as e:
+    except Exception:
         return _internal_error()
 
 
@@ -3108,8 +3229,8 @@ def get_mcp_profiles(request: Request):
     """
     try:
         from superlocalmemory.mcp.profiles import (
-            _PROFILE_DEFINITIONS,
             _PROFILE_ALIASES,
+            _PROFILE_DEFINITIONS,
             PROFILE_DESCRIPTIONS,
         )
 

@@ -11,7 +11,7 @@ when_to_use: |
   - "The dashboard asks for a key" (slm token show)
   - Enterprise deployment with multi-team shared SLM
   - Compliance, audit, or data governance task
-allowed-tools: audit_trail, set_retention_policy, get_retention_stats, get_lifecycle_status, compact_memories, consistency_check, recall, search, remember, Bash
+allowed-tools: audit_trail, set_retention_policy, get_retention_stats, get_lifecycle_status, compact_memories, consistency_check, recall, search, remember, Bash(slm:*)
 ---
 
 # slm-governance — Governed Workspace Behavior
@@ -114,7 +114,7 @@ a picture or page only when its text held no secret or personal data.
 
 When login is required, every operation on memories needs a signed-in user,
 including the connection your assistant uses. SLM handles this at the daemon
-level; agents do not pass credentials in tool calls. If a tool call returns an
+level; agents never put credentials in tool calls. If a tool call returns an
 authentication or permission error, you must:
 
 1. Stop the current operation immediately.
@@ -218,7 +218,11 @@ slm delete <fact_id> --yes --json
 ```
 
 Memories that belong to a reviewed correction cannot be deleted this way; the
-refusal names the case. After an erasure, confirm with `slm recall "<content>"`
+refusal names the case. A case SLM proposed by itself and nobody reviewed does
+not block a delete, and `slm corrections dismiss` (dry run first, `--apply`
+takes a backup) closes a pile of them. Never reject cases in bulk: a rejected
+case counts as decided, so rejecting thousands would lock their memories against
+deletion for good, including when a person asks for erasure. After an erasure, confirm with `slm recall "<content>"`
 that nothing comes back, and never try to re-derive erased content from other
 stored facts.
 
@@ -276,4 +280,4 @@ Before running any destructive or state-changing operation (`forget`,
 
 ---
 
-*SuperLocalMemory v4.2.6 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.2.19 · Qualixar · AGPL-3.0-or-later*

@@ -21,12 +21,11 @@ import hashlib
 import logging
 from typing import TYPE_CHECKING, Callable
 
-from mcp.types import ToolAnnotations
-
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
 from superlocalmemory.mcp.shared import authorize_mcp_mutation
+from superlocalmemory.mcp.tool_hints import ADDS, READ_ONLY, SETS
 from superlocalmemory.storage.database import (
     current_fact_clause_for_connection,
 )
@@ -365,7 +364,7 @@ def _soft_prompt_for(engine, profile_id: str) -> str:
 def register_active_tools(server, get_engine: Callable) -> None:
     """Register 3 active memory tools on *server*."""
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Load Session Context", annotations=READ_ONLY)
     @admits(OperationKind.RECALL)
     async def session_init(
         project_path: str = "",
@@ -390,7 +389,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
             agent_id=agent_id,
         )
 
-    @server.tool()
+    @server.tool(title="Observe Conversation", annotations=ADDS)
     @admits(OperationKind.REMEMBER)
     async def observe(
         content: str,
@@ -512,7 +511,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
             logger.exception("observe failed")
             return {"captured": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(title="Report Recall Feedback", annotations=ADDS)
     @admits(OperationKind.REMEMBER)
     async def report_feedback(
         fact_id: str,
@@ -625,7 +624,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
             logger.exception("report_feedback failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(title="Close Session", annotations=ADDS)
     @admits(OperationKind.CONSOLIDATE)
     async def close_session(session_id: str = "", profile_id: str = "") -> dict:
         """Close the current session and create temporal summary events.
@@ -670,8 +669,9 @@ def register_active_tools(server, get_engine: Callable) -> None:
                 profile_id=pid,
                 content_preview=sid,
             )
-            count = (
-                engine.close_session(sid, profile_id=named) if named else engine.close_session(sid)
+            count = await asyncio.to_thread(
+                (lambda: engine.close_session(sid, profile_id=named))
+                if named else (lambda: engine.close_session(sid))
             )
             authorization.complete()
             return {
@@ -683,7 +683,7 @@ def register_active_tools(server, get_engine: Callable) -> None:
             logger.exception("close_session failed")
             return {"success": False, "error": str(exc)}
 
-    @server.tool()
+    @server.tool(title="Manage Core Memory Pins", annotations=SETS)
     @admits(OperationKind.CORRECT)
     async def core_memory(
         action: str,

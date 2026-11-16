@@ -1,12 +1,12 @@
 ---
 name: slm-profile
 description: Memory profiles (separate namespaces inside one SuperLocalMemory store) and MCP tool sets (which tools your host sees). Use switch_profile or slm profile switch to change the active memory profile, the profile_id argument to read or write another profile for one call, and `slm tools set <name>` to choose the tool set every connected app sees. Required when working across multiple projects, clients, or tenants.
-version: "4.2.6"
+version: "4.2.19"
 agent: agent
 tools:
   - switch_profile
   - get_status
-  - Bash
+  - Bash(slm:*)
 ---
 
 # slm-profile — Memory Profiles and Tool Sets
@@ -95,7 +95,7 @@ named differently (for example `superlocalmemory-personal` and
 |---------|-------|------------|
 | `core` | 19 tools — remember, recall, search, fetch, expand, list_recent, update_memory, forget, session, optimize, corrections, summaries, switch_profile | Smallest set |
 | `code` | 39 tools — core + portable Brain evidence, report_outcome/report_feedback, 6 code-graph tools, memory kinds, bounded loops | For coding agents that need the graph; no mesh, no `get_status` |
-| `full` | 58 tools — everyday memory, delete_memory, get_status, observe, saved views, learning tools, skills, optimize, kinds, loops, mesh | The default for every app |
+| `full` | 58 tools (5 more while images are on) — everyday memory, delete_memory, get_status, observe, saved views, learning tools, skills, optimize, kinds, loops, mesh | The default for every app |
 | `power` | 70 tools — full + audit_trail, retention, compaction, consistency_check, behavioral and diagnostic tools | Governance and admin work |
 | `mesh` | 9 tools — mesh coordination only | Lightweight cross-session signalling |
 
@@ -160,4 +160,4 @@ anything but `core` or `mesh`.
 
 ---
 
-*SuperLocalMemory v4.2.6 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.2.19 · Qualixar · AGPL-3.0-or-later*

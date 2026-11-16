@@ -1,0 +1,11 @@
+/* od-star-ask.css - the GitHub star link in the top bar and the dismissible Dashboard card.
+ * Uses the shared theme variables only, so it follows light, dark and the SLM theme.
+ * Copyright (c) 2026 Varun Pratap Bhardwaj / Qualixar - AGPL-3.0 */
+.topbar .star-cta { padding: 0 13px; height: 34px; font-size: 12.5px; }
+.star-cta .od-star-glyph { color: var(--warn); font-size: 14px; line-height: 1; }
+
+.od-star-ask { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+.od-star-ask .od-star-text { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--fg); flex: 1 1 280px; }
+.od-star-ask .od-star-actions { display: flex; align-items: center; gap: 8px; }
+.od-star-ask a.btn { text-decoration: none; }
+.od-star-ask .od-star-glyph { color: inherit; margin-right: 2px; }

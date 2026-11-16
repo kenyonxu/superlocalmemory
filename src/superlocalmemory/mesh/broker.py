@@ -5,7 +5,8 @@
 """SLM Mesh Broker — core orchestration for P2P agent communication.
 
 Manages peer lifecycle, scheduled cleanup, and event logging.
-All operations use the shared memory.db via SQLite tables with mesh_ prefix.
+All operations use mesh.db, the mesh's own file next to memory.db (4.2.8; see
+mesh_store), so a mesh write never races the canonical memory writer.
 
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
@@ -17,22 +18,28 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from collections.abc import Sequence
 from typing import Any, Callable, TypeVar
 
 logger = logging.getLogger("superlocalmemory.mesh")
-import os as _os
+import os as _os  # noqa: E402 - late import, order kept
 
-from .broker_security import (  # noqa: E501
-    apply_security_schema, check_cross_profile_sender, ensure_db_healthy, get_or_create_peer_key, reject_secret_state, seed_fencing_counter, _set_nonce_db_path, validate_lock_fence_query,  # noqa: E501
+from . import broker_cleanup, broker_inbox, broker_profiles  # noqa: E402 - late import, order kept
+from .broker_owner import OwnerControlsMixin  # noqa: E402 - late import, order kept
+from .broker_security import (  # noqa: E501, E402
+    _set_nonce_db_path,
+    apply_security_schema,  # noqa: E501
+    check_cross_profile_sender,
+    ensure_db_healthy,
+    get_or_create_peer_key,
+    reject_secret_state,
+    seed_fencing_counter,
+    validate_lock_fence_query,
 )
-
-from . import broker_cleanup, broker_inbox, broker_profiles
-from .broker_owner import OwnerControlsMixin
-from .broker_web import WebPeersMixin
-from .envelope import Origin
+from .broker_web import WebPeersMixin  # noqa: E402 - late import, order kept
+from .envelope import Origin  # noqa: E402 - late import, order kept
 
 # Remote sync support (optional, try/except to avoid import issues)
 try:
@@ -52,16 +59,35 @@ _T = TypeVar("_T")
 # Retry budget for a transient writer collision. 250ms was too thin under
 # multi-agent load; 2000ms matches the RBAC store. 4 attempts keeps the total
 # worst-case budget bounded (~2s x backoff) rather than unbounded stalls.
-_WRITE_RETRY_ATTEMPTS = 4
-_WRITE_RETRY_BASE_SECONDS = 0.025
+# 4.2.7: 6 attempts with a longer back-off (~1.5 s of pauses) instead of 4
+# (~0.2 s). Under heavy load (a full test suite, a backfill) heartbeats and
+# registrations lost the race for memory.db 382 times on 13-14 Oct while
+# memory saves queued through the single writer; 4.2.8 moves mesh writes
+# off that race entirely (.backup/4.2.8/BACKLOG-4.2.8.md).
+_WRITE_RETRY_ATTEMPTS = 6
+_WRITE_RETRY_BASE_SECONDS = 0.05
 _WRITE_BUSY_TIMEOUT_MS = 2000
+
+
+def _is_store_fault(exc: sqlite3.DatabaseError) -> bool:
+    """The file itself is gone or damaged, not the request."""
+    message = str(exc).lower()
+    return any(m in message for m in ("malformed", "not a database", "no such table"))
 
 
 class MeshBroker(OwnerControlsMixin, WebPeersMixin):
     """Lightweight mesh broker — peer lifecycle, messaging, state, locks, events."""
 
-    def __init__(self, db_path: str | Path):
+    _memory_db: Path | None = None
+    _retention_days: int = broker_cleanup.DEFAULT_RETENTION_DAYS
+
+    def __init__(self, db_path: str | Path, *, memory_db: str | Path | None = None,
+                 retention_days: int = broker_cleanup.DEFAULT_RETENTION_DAYS):
         self._db_path = str(db_path)
+        # Set by for_store: the store mesh.db is rebuilt from if it is lost or corrupt.
+        self._memory_db = Path(memory_db) if memory_db is not None else None
+        self._retention_days = retention_days
+        self._recover_lock = threading.Lock()
         self._started_at = time.monotonic()
         self._cleanup_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -87,6 +113,31 @@ class MeshBroker(OwnerControlsMixin, WebPeersMixin):
         self._apply_schema_updates()
         _set_nonce_db_path(self._db_path)  # SEC-3: wire SQLite nonce store for durability
         self._fencing_counter = seed_fencing_counter(self._db_path)  # 3a-3: restart-safe fence
+
+    @classmethod
+    def for_store(cls, memory_db: str | Path, *,
+                  retention_days: int = broker_cleanup.DEFAULT_RETENTION_DAYS) -> "MeshBroker":
+        """The daemon's broker: mesh.db next to ``memory_db``, migrated on first open."""
+        from .mesh_store import prepare_mesh_db
+
+        mesh_db = prepare_mesh_db(memory_db, retention_days=retention_days)
+        return cls(mesh_db, memory_db=memory_db, retention_days=retention_days)
+
+    def _recover_store(self) -> bool:
+        """Rebuild a lost or corrupt mesh.db instead of failing every call (once per loss)."""
+        if self._memory_db is None:
+            return False
+        from . import mesh_store
+
+        with self._recover_lock:
+            # Busy or not openable is not damage: the caller's own retry handles it.
+            if mesh_store.inspect(self._db_path)["status"] in ("missing", "corrupt",
+                                                               "unmigrated"):
+                mesh_store.prepare_mesh_db(self._memory_db,
+                                           retention_days=self._retention_days)
+                self._apply_schema_updates()
+                return True
+        return False
 
     # -- Remote / Multi-Machine support (v3.4.47) --
 
@@ -163,12 +214,15 @@ class MeshBroker(OwnerControlsMixin, WebPeersMixin):
     # -- Connection helper --
 
     def _conn(self) -> sqlite3.Connection:
+        if self._memory_db is not None and not _os.path.exists(self._db_path):
+            self._recover_store()  # deleted under a live daemon: rebuild, do not crash
         conn = sqlite3.connect(
             self._db_path,
             timeout=_WRITE_BUSY_TIMEOUT_MS / 1000,
         )
         try:
             conn.execute(f"PRAGMA busy_timeout={_WRITE_BUSY_TIMEOUT_MS}")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.row_factory = sqlite3.Row
         except BaseException:
             # Setup failed: close it now, or the file stays open (Windows
@@ -189,8 +243,12 @@ class MeshBroker(OwnerControlsMixin, WebPeersMixin):
             conn = self._conn()
             try:
                 return operation(conn)
-            except sqlite3.OperationalError as exc:
-                if not self._is_transient_lock(exc):
+            except sqlite3.DatabaseError as exc:
+                transient = isinstance(exc, sqlite3.OperationalError) and self._is_transient_lock(exc)
+                if not transient:
+                    conn.close()
+                    if attempt == 0 and _is_store_fault(exc) and self._recover_store():
+                        continue  # mesh.db was corrupt or lost: rebuilt, try once more
                     raise
                 last_error = exc
                 try:
@@ -354,7 +412,8 @@ class MeshBroker(OwnerControlsMixin, WebPeersMixin):
 
     @staticmethod
     def _too_large(content: str) -> dict:
-        return {"ok": False, "error": f"message too large ({len(content.encode('utf-8'))} bytes, max {MAX_MESSAGE_SIZE}). "
+        return {"ok": False, "error":
+                f"message too large ({len(content.encode('utf-8'))} bytes, max {MAX_MESSAGE_SIZE}). "
                 "Mesh messages are notifications — reference a file path instead."}
 
     def _forward_if_remote(self, from_peer: str, to_peer: str, content: str,
@@ -458,7 +517,10 @@ class MeshBroker(OwnerControlsMixin, WebPeersMixin):
         if fields is not None:
             broker_profiles.insert_envelope(conn, msg_id, kind=kind, app=app, fields=fields)
         if operation_id:
-            conn.execute("INSERT OR IGNORE INTO mesh_sent_ops (operation_id, message_id, created_at) VALUES (?, ?, ?)", (operation_id, msg_id, now))
+            conn.execute(
+                "INSERT OR IGNORE INTO mesh_sent_ops (operation_id, message_id, created_at) VALUES (?, ?, ?)",
+                (operation_id, msg_id, now),
+            )
         self._log_event(conn, "message_sent", from_peer or "system", {
             "to": _to_peer, "target_type": target_type, "project": _project_path,
         }, profile_id=profile_id)
@@ -730,4 +792,5 @@ class MeshBroker(OwnerControlsMixin, WebPeersMixin):
                 logger.debug("Mesh cleanup error: %s", exc)
 
     def _run_cleanup(self) -> None:
-        self._write_with_retry(broker_cleanup.run_cleanup)
+        days = self._retention_days
+        self._write_with_retry(lambda conn: broker_cleanup.run_cleanup(conn, days))

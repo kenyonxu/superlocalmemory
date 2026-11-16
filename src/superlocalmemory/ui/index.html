@@ -31,6 +31,7 @@
     <link rel="stylesheet" href="static/css/od-apps.css?v=7600a0ed">
     <!-- Website palette, responsive fixes, dashboard home, help UI (loaded last) -->
     <link rel="stylesheet" href="static/css/theme-slm.css?v=9a8efc28">
+    <link rel="stylesheet" href="static/css/od-star-ask.css?v=da9c16a1">
 </head>
 <body>
 
@@ -56,6 +57,9 @@
       <span class="badge-local" title="Local-first memory; active mode and integrations determine network egress.">
         <i class="bi bi-lock-fill" aria-hidden="true"></i> LOCAL-FIRST
       </span>
+      <a class="star-cta" id="star-cta" href="https://github.com/qualixar/superlocalmemory" target="_blank" rel="noopener noreferrer" title="If SuperLocalMemory helps you, a GitHub star helps other developers find it">
+        <span class="od-star-glyph" aria-hidden="true">&#9733;</span><span class="lbl">Star on GitHub</span>
+      </a>
       <button class="btn icon ghost" data-theme-icon aria-label="Toggle theme"></button>
     </header>
     <main class="content" id="main-content">
@@ -168,6 +172,9 @@
 
               <!-- First-run Welcome card: filled by od-welcome.js, only on a new store the person has not dismissed -->
               <div id="od-welcome"></div>
+
+              <!-- GitHub star ask: filled by od-star-ask.js, hidden for good once dismissed or clicked -->
+              <div id="od-star-ask"></div>
 
               <!-- KPI row. Each tile loads on its own and shows a skeleton, then a value or "Unavailable". -->
               <section class="kpi-strip dash-kpis" aria-label="Key numbers">
@@ -1109,7 +1116,7 @@
                             <div class="btn-group w-100" role="group">
                                 <input type="radio" class="btn-check" name="settings-mode-radio" id="mode-a-radio" value="a" checked>
                                 <label class="btn btn-outline-success" for="mode-a-radio">
-                                    <strong>Mode A</strong><br><small>Zero Cloud</small>
+                                    <strong>Mode A</strong><br><small id="mode-a-card-note">Zero Cloud</small>
                                 </label>
                                 <input type="radio" class="btn-check" name="settings-mode-radio" id="mode-b-radio" value="b">
                                 <label class="btn btn-outline-info" for="mode-b-radio">
@@ -1202,6 +1209,10 @@
                                     <label class="form-label small">API Key (optional)</label>
                                     <input type="password" id="settings-emb-key" class="form-control form-control-sm" placeholder="not-needed">
                                 </div>
+                            </div>
+                            <div id="settings-emb-locality-note" class="small text-warning mb-2" style="display:none;">
+                                If this endpoint is not on this computer or your local network, your
+                                memory text leaves this computer every time a memory is saved or recalled.
                             </div>
                             <div id="settings-emb-test-row" style="display:none;">
                                 <button class="btn btn-sm btn-outline-info" id="settings-emb-test-btn">
@@ -1675,6 +1686,7 @@
     <!-- 4.1.25: images and documents card, shared by the Documents & Images pane -->
     <script src="static/js/od-features.js?v=afbe0191"></script>
     <script src="static/js/od-welcome.js?v=a48dd6b3"></script>
+    <script src="static/js/od-star-ask.js?v=45f33e80"></script>
     <script src="static/js/od-botmessages.js?v=4b4828a5"></script>
     <script src="static/js/od-sources.js?v=b96dd2f9"></script>
     <script src="static/js/od-media-find.js?v=10cc0e63"></script>

@@ -186,6 +186,13 @@ export function renderPluginJson(manifest) {
     keywords: manifest.keywords || [],
     homepage: 'https://superlocalmemory.com',
     license: 'AGPL-3.0-or-later',
+    // Listing fields Anthropic's plugin directory reads (Claude Code ignores
+    // them): icon is a square 512 px PNG inside the plugin.
+    icon: './.claude-plugin/icon.png',
+    documentationUrl: 'https://github.com/qualixar/superlocalmemory/blob/main/docs/plugins.md',
+    supportUrl: 'https://github.com/qualixar/superlocalmemory/issues',
+    privacyPolicyUrl: 'https://github.com/qualixar/superlocalmemory/blob/main/PRIVACY.md',
+    termsOfServiceUrl: 'https://qualixar.com/terms',
     mcpServers: './.mcp.json',
     name: manifest.pluginName,
     repository: manifest.repository || '',
@@ -341,6 +348,82 @@ export function deriveManagedRoots(root, manifest) {
  * @param {object} manifest parsed manifest
  * @returns {Map<string, string>}
  */
+const HOST_DESCRIPTION =
+  'Local-first agent memory as an MCP server: remember, recall and search across sessions and agents, on your own machine.';
+
+/** Qwen Code extension manifest (qwen-extension.json at the plugin root). */
+export function renderQwenExtensionJson(manifest) {
+  return JSON.stringify({
+    name: manifest.pluginName,
+    version: manifest.version,
+    description: HOST_DESCRIPTION,
+    mcpServers: {
+      superlocalmemory: {
+        command: '${extensionPath}/scripts/slm-launch',
+        args: [],
+        env: { SLM_AGENT_ID: 'qwen_code' },
+      },
+    },
+  }, null, 2) + '\n';
+}
+
+/** Kimi Code plugin manifest (kimi.plugin.json at the plugin root). */
+export function renderKimiPluginJson(manifest) {
+  return JSON.stringify({
+    name: manifest.pluginName,
+    version: manifest.version,
+    description: HOST_DESCRIPTION,
+    skills: './skills/',
+    agents: './agents/',
+    interface: {
+      displayName: manifest.displayName,
+      shortDescription: 'Local-first memory for your agents',
+      developerName: 'Qualixar',
+      websiteURL: 'https://superlocalmemory.com',
+    },
+    mcpServers: {
+      superlocalmemory: {
+        command: './scripts/slm-launch',
+        args: [],
+        env: { SLM_AGENT_ID: 'kimi_code' },
+      },
+    },
+  }, null, 2) + '\n';
+}
+
+/** Agent Plugins 1.0.0 plugin.json (Kiro powers and other cross-tool hosts). */
+export function renderAgentPluginJson(manifest) {
+  return JSON.stringify({
+    $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+    name: manifest.pluginName,
+    version: manifest.version,
+    description: HOST_DESCRIPTION,
+    author: { name: 'Qualixar', url: 'https://github.com/qualixar' },
+    keywords: ['memory', 'remember', 'recall', 'agent memory', 'mcp', 'local-first', 'context'],
+    homepage: 'https://superlocalmemory.com',
+    repository: manifest.repository,
+    license: 'AGPL-3.0-or-later',
+  }, null, 2) + '\n';
+}
+
+/**
+ * Agent Plugins 1.0.0 mcp.json. The format has no plugin-root variable, so the
+ * server is the installed `slm` on PATH (same as the Codex build).
+ */
+export function renderAgentMcpJson() {
+  return JSON.stringify({
+    $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
+    mcpServers: {
+      superlocalmemory: {
+        type: 'stdio',
+        command: 'slm',
+        args: ['mcp'],
+        env: { SLM_AGENT_ID: 'agent_plugins' },
+      },
+    },
+  }, null, 2) + '\n';
+}
+
 export function buildPlan(root, manifest) {
   const plan = new Map();
 
@@ -388,6 +471,16 @@ export function buildPlan(root, manifest) {
   // plugin/.claude-plugin/plugin.json
   // ---------------------------------------------------------------------------
   plan.set(path.join(pluginClaudeDir, 'plugin.json'), renderPluginJson(manifest));
+
+  // Native manifests for Qwen Code and Kimi Code, so neither host has to
+  // convert the Claude manifest. Qwen's converter nested mcpServers one level
+  // too deep and kept the Windows-only ${ComSpec} launch line (found 4.2.8).
+  plan.set(path.join(pluginRoot, 'qwen-extension.json'), renderQwenExtensionJson(manifest));
+  plan.set(path.join(pluginRoot, 'kimi.plugin.json'), renderKimiPluginJson(manifest));
+  // Agent Plugins 1.0.0 manifest + MCP config at the plugin root: Kiro powers,
+  // and any other host that reads the cross-tool format (Codewhale, Copilot).
+  plan.set(path.join(pluginRoot, 'plugin.json'), renderAgentPluginJson(manifest));
+  plan.set(path.join(pluginRoot, 'mcp.json'), renderAgentMcpJson());
 
   // ---------------------------------------------------------------------------
   // .claude-plugin/marketplace.json at REPO ROOT (not plugin root)
@@ -471,7 +564,9 @@ export function buildPlan(root, manifest) {
       if (fname === '.gitkeep') continue;
       const srcFile = path.join(scriptsSrcPath, fname);
       if (!fs.statSync(srcFile).isFile()) continue;
-      const content = fs.readFileSync(srcFile, 'utf8');
+      // __SLM_RELEASE__ becomes this release, so a uvx launch names an exact,
+      // readable pin (see plugin-src/scripts/slm-launch).
+      const content = fs.readFileSync(srcFile, 'utf8').replaceAll('__SLM_RELEASE__', manifest.version);
       plan.set(path.join(pluginRoot, 'scripts', fname), content);
     }
   }
@@ -481,6 +576,9 @@ export function buildPlan(root, manifest) {
   plan.set(path.join(pluginRoot, 'README.md'),
     fs.readFileSync(path.join(root, 'plugin-src', 'docs', 'README.md'), 'utf8'));
   plan.set(path.join(pluginRoot, 'LICENSE'), fs.readFileSync(path.join(root, 'LICENSE'), 'utf8'));
+  // Directory listing icon (binary): copied byte for byte by applyPlan.
+  plan.set(path.join(pluginRoot, '.claude-plugin', 'icon.png'),
+    fs.readFileSync(path.join(root, 'assets', 'branding', 'slm-mark.png')));
 
   // No plugin/CLAUDE.md: Claude Code does not load a CLAUDE.md at a plugin's
   // root, and `claude plugin validate --strict` (the plugin directory's gate)
@@ -540,13 +638,13 @@ export function applyPlan(plan) {
         fs.unlinkSync(absPath);
         // existingHash stays null → will write
       } else {
-        existingHash = sha256(fs.readFileSync(absPath, 'utf8'));
+        existingHash = sha256(fs.readFileSync(absPath, Buffer.isBuffer(content) ? undefined : 'utf8'));
       }
     }
 
     if (existingHash !== newHash) {
       fs.mkdirSync(path.dirname(absPath), { recursive: true });
-      fs.writeFileSync(absPath, content, 'utf8');
+      fs.writeFileSync(absPath, content, Buffer.isBuffer(content) ? undefined : 'utf8');
       // Preserve executable bit for shell scripts and extensionless launchers
       if (_isExecutable(absPath)) {
         const mode = fs.statSync(absPath).mode;
@@ -588,7 +686,7 @@ export function checkPlan(plan, root, manifest) {
     if (!fs.existsSync(absPath)) {
       missing.push(absPath);
     } else {
-      const disk = sha256(fs.readFileSync(absPath, 'utf8'));
+      const disk = sha256(fs.readFileSync(absPath, Buffer.isBuffer(content) ? undefined : 'utf8'));
       const expected = sha256(content);
       if (disk !== expected) stale.push(absPath);
     }

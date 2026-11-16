@@ -369,13 +369,11 @@ class ProjectionDrain:
             # is nothing to project and nothing to remove.
             return "skipped"
         if state == "hidden":
-            # Archived or withheld. It must stop being offered as a candidate —
-            # but its EDGES stay. The SQLite entity map filters on visibility
-            # and its edge walk does not, so deleting a hidden fact's edges
-            # would leave every visible fact that neighboured it with a smaller
-            # adjacency here than in SQLite, and the two graphs would answer
-            # differently. Measured on a real store before this was split: 32
-            # visible facts had lost edges, every missing endpoint quarantined.
+            # Archived or withheld: it leaves the projection, edges included. The
+            # SQLite channel prunes both endpoints of every edge against the
+            # visible corpus, and the logical-edge set (storage/logical_edges)
+            # excludes such edges, so keeping them here would let a withheld
+            # fact steer a walk (corrected 2026-08-22; see the drain tests).
             self._remove(fact_id, graph, vector)
             return "removed"
 
@@ -429,17 +427,25 @@ class ProjectionDrain:
                 profile_id,
             )
         graph.add_fact_entities(fact.fact_id, entities, profile_id)
-        for row in self._db.execute(
-            "SELECT source_id, target_id, edge_type, weight FROM graph_edges "
-            "WHERE profile_id = ? AND (source_id = ? OR target_id = ?)",
-            (profile_id, fact.fact_id, fact.fact_id),
-        ):
-            edge = dict(row)
-            graph.add_edge(
-                edge["source_id"], edge["target_id"],
-                edge.get("edge_type") or "related",
-                float(edge.get("weight") or 1.0), profile_id=profile_id,
-            )
+        # The same logical edges a bulk import builds: an edge whose other end is withheld
+        # stays out, or every re-projection of a visible neighbour would put it back (#296).
+        from superlocalmemory.storage.logical_edges import fact_edge_select
+
+        edges = [
+            (e["source_id"], e["target_id"], e.get("edge_type") or "related",
+             float(e.get("weight") or 1.0))
+            for e in map(dict, self._db.execute(
+                fact_edge_select(self._db.visible_fact_clause(prefix="f")),
+                (profile_id, fact.fact_id, fact.fact_id),
+            ))
+        ]
+        # #306: one write for all of this fact's edges, not one per edge.
+        add_edges = getattr(graph, "add_edges", None)
+        if add_edges is not None:
+            add_edges(edges, profile_id=profile_id)
+            return
+        for source_id, target_id, edge_type, weight in edges:
+            graph.add_edge(source_id, target_id, edge_type, weight, profile_id=profile_id)
 
     def _project_vector(self, fact: Any, batch: "_VectorBatch") -> None:
         """Buffer this fact's embedding for the pass's single vector write.

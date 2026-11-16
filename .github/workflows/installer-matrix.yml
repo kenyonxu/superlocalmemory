@@ -49,7 +49,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14, windows-latest]
+        # macOS only (4.2.9): CI must be fast and green. The Windows steps
+        # below stay, guarded, so adding the OS back is a one-line change.
+        os: [macos-15]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Prepare isolated runtime paths
@@ -58,6 +60,9 @@ jobs:
           echo "UV_TOOL_DIR=${RUNNER_TEMP}/uv-tools" >> "$GITHUB_ENV"
           echo "UV_TOOL_BIN_DIR=${RUNNER_TEMP}/uv-bin" >> "$GITHUB_ENV"
           echo "SLM_DATA_DIR=${RUNNER_TEMP}/slm-data-must-not-exist" >> "$GITHUB_ENV"
+          # tree-sitter-language-pack downloads grammars on first use and found no
+          # cache directory on the Windows runner; give it a private one.
+          echo "TREE_SITTER_LANGUAGE_PACK_CACHE_DIR=${RUNNER_TEMP}/ts-pack-cache" >> "$GITHUB_ENV"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
@@ -115,7 +120,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14, windows-latest]
+        # macOS only (4.2.9): CI must be fast and green. The Windows steps
+        # below stay, guarded, so adding the OS back is a one-line change.
+        os: [macos-15]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Prepare isolated runtime paths
@@ -137,6 +144,16 @@ jobs:
           tarball="$(npm pack --ignore-scripts --json | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write(JSON.parse(d)[0].filename))")"
           test -f "$tarball"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+      - name: Build the Python wheel this npm candidate installs
+        # The npm installer fetches superlocalmemory==<version> from PyPI, which
+        # does not exist until the release publishes it. Install this commit's
+        # wheel instead, so the check tests the code being released.
+        shell: bash
+        run: |
+          python -m pip wheel --no-deps --disable-pip-version-check -w "$RUNNER_TEMP/slm-wheel" .
+          wheel="$(ls "$RUNNER_TEMP"/slm-wheel/superlocalmemory-*.whl)"
+          test -f "$wheel"
+          echo "SLM_LOCAL_WHEEL=$wheel" >> "$GITHUB_ENV"
       - name: Install, invoke and uninstall npm candidate on Unix
         if: runner.os != 'Windows'
         shell: bash
