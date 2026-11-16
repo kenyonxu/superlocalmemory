@@ -74,7 +74,7 @@ When `SLM_MESH_DISCOVERY=on` (default) and `zeroconf` is installed, SLM automati
 
 Install zeroconf support:
 ```bash
-python -m pip install "superlocalmemory[mesh]"
+python -m pip install "mslm-memory[mesh]"
 # or
 python -m pip install zeroconf
 ```

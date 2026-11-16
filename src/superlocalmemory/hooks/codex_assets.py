@@ -183,7 +183,7 @@ def _package_version() -> str:
     try:
         from importlib.metadata import version
 
-        return version("superlocalmemory")
+        return version("mslm-memory")
     except Exception:  # noqa: BLE001 - fall back to the version the source declares
         from superlocalmemory import __version__
 

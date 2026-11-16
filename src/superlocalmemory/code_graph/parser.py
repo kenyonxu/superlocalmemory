@@ -340,7 +340,7 @@ class CodeParser:
             from tree_sitter_language_pack import get_parser
         except ImportError as exc:
             raise ImportError(
-                "tree-sitter required. Install: pip install 'superlocalmemory[code-graph]'"
+                "tree-sitter required. Install: pip install 'mslm-memory[code-graph]'"
             ) from exc
 
         parser = get_parser(language)

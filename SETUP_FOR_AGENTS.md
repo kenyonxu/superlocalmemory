@@ -30,10 +30,10 @@ multi-session projects coherent. Cost at Mode A: zero.
 Use the first route this computer supports:
 
 ```bash
-node --version      # 18 or later: npm install -g superlocalmemory
-pipx --version      # otherwise:   pipx install superlocalmemory
+node --version      # 18 or later: npm install -g mslm-memory
+pipx --version      # otherwise:   pipx install mslm-memory
 python3 --version   # 3.12 to 3.14, no npm or pipx: python3 -m venv ~/.slm-venv,
-                    #   then ~/.slm-venv/bin/python -m pip install superlocalmemory
+                    #   then ~/.slm-venv/bin/python -m pip install mslm-memory
 ```
 
 Never `sudo pip install` and never install into the system Python.

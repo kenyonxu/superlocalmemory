@@ -67,12 +67,12 @@ winget install Python.Python.3.12
 mkdir -p ~/.npm-global
 npm config set prefix '~/.npm-global'
 export PATH=~/.npm-global/bin:$PATH
-npm install -g superlocalmemory
+npm install -g mslm-memory
 
 # Option 2: install inside an activated Python virtual environment
 python3 -m venv .venv
 source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install superlocalmemory
+python -m pip install mslm-memory
 ```
 
 ## Recall Issues
@@ -284,8 +284,8 @@ The MCP server failed to start. Common causes:
 
 ```bash
 # Reinstall
-npm uninstall -g superlocalmemory
-npm install -g superlocalmemory
+npm uninstall -g mslm-memory
+npm install -g mslm-memory
 
 # Verify
 slm status

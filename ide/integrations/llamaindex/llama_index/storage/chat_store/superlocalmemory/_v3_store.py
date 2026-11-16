@@ -26,7 +26,7 @@ def _load_v3_types():
         )
         raise ImportError(
             "SuperLocalMemory V3 is not installed in this Python environment. "
-            "Install it with: python -m pip install superlocalmemory."
+            "Install it with: python -m pip install mslm-memory."
             f"{legacy_note}"
         ) from exc
     return SLMConfig, MemoryEngine, Mode

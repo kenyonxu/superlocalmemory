@@ -41,7 +41,7 @@ HOST_NAMES = {
 
 def installed_version() -> str:
     try:
-        return version("superlocalmemory")
+        return version("mslm-memory")
     except PackageNotFoundError:
         from superlocalmemory import __version__
 

@@ -44,7 +44,7 @@ def _load_v3_types():
     except ImportError as exc:  # pragma: no cover - defensive
         raise ImportError(
             "SuperLocalMemory V3 is not installed in this Python environment. "
-            "Install it with: python -m pip install superlocalmemory."
+            "Install it with: python -m pip install mslm-memory."
         ) from exc
     return SLMConfig, MemoryEngine, Mode
 

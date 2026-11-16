@@ -12,7 +12,7 @@ Use this when you want the guided profile setup and the `slm` command without
 managing a Python environment yourself.
 
 ```bash
-npm install -g superlocalmemory
+npm install -g mslm-memory
 slm setup
 slm doctor
 ```
@@ -29,7 +29,7 @@ Use a dedicated virtual environment for both the `slm` command and Python API:
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install superlocalmemory
+python -m pip install mslm-memory
 ```
 
 Do not use `sudo pip`, do not override an externally managed Python, and do not
@@ -58,10 +58,10 @@ it does not keep running on a mix of old and new package files:
 
 ```bash
 slm serve stop
-uv tool upgrade superlocalmemory
+uv tool upgrade mslm-memory
 slm restart && slm doctor
 
-uv tool uninstall superlocalmemory   # removes code only; memory data is preserved
+uv tool uninstall mslm-memory   # removes code only; memory data is preserved
 ```
 
 The uv tool environment is not an activated virtual environment, so the Python

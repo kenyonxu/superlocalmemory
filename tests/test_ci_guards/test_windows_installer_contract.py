@@ -86,11 +86,11 @@ def _powershell() -> str | None:
     ("manager", "action", "expected"),
     [
         ("uv", "Install", "tool install"),
-        ("uv", "Upgrade", "tool upgrade superlocalmemory"),
-        ("uv", "Uninstall", "tool uninstall superlocalmemory"),
+        ("uv", "Upgrade", "tool upgrade mslm-memory"),
+        ("uv", "Uninstall", "tool uninstall mslm-memory"),
         ("pipx", "Install", "install"),
-        ("pipx", "Upgrade", "upgrade superlocalmemory"),
-        ("pipx", "Uninstall", "uninstall superlocalmemory"),
+        ("pipx", "Upgrade", "upgrade mslm-memory"),
+        ("pipx", "Uninstall", "uninstall mslm-memory"),
     ],
 )
 def test_windows_dry_run_emits_exact_lifecycle_command(
@@ -151,7 +151,7 @@ def test_windows_dry_run_supports_an_exact_release_version() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "tool install superlocalmemory==3.7.5" in result.stdout.lower()
+    assert "tool install mslm-memory==3.7.5" in result.stdout.lower()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows runtime contract runs in Windows CI")

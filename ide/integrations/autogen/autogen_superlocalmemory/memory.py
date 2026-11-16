@@ -47,7 +47,7 @@ logger = logging.getLogger("slm.adapters.autogen")
 
 # ``SLM_INSTALL_DIR`` is legacy installer metadata only. It is deliberately
 # never added to ``sys.path``; install the V3 runtime with
-# ``python -m pip install superlocalmemory``.
+# ``python -m pip install mslm-memory``.
 def _data_root() -> Path:
     value = (
         os.environ.get("SLM_DATA_DIR")

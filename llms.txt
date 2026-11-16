@@ -5,7 +5,7 @@
 ## Install it for your user (AI agents)
 
 - [SETUP_FOR_AGENTS.md](https://github.com/qualixar/superlocalmemory/blob/main/SETUP_FOR_AGENTS.md): numbered, non-interactive install steps with expected output.
-- Packages: `npm install -g superlocalmemory` or `pipx install superlocalmemory` (Python 3.12+).
+- Packages: `npm install -g mslm-memory` or `pipx install mslm-memory` (Python 3.12+).
 - Then: `slm init --auto`, `slm serve start`, `slm warmup`, `slm connect <host>` (Claude Code: `claude plugin install superlocalmemory@qualixar`).
 - MCP: stdio `slm mcp`, or HTTP `http://127.0.0.1:8765/mcp/`. Call `session_init` at session start; `remember` and `recall` while working; `expand` to see more of one result.
 

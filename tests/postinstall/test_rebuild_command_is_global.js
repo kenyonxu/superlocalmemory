@@ -61,5 +61,5 @@ test('the wrapper, run with no runtime, tells a global install how to repair it'
   const result = spawnSync('node', [path.join(dir, 'bin', 'slm-npm')], { encoding: 'utf8', timeout: 15000 });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /npm rebuild -g superlocalmemory/);
-  assert.doesNotMatch(result.stderr, /npm rebuild superlocalmemory/);
+  assert.doesNotMatch(result.stderr, /npm rebuild mslm-memory/);
 });

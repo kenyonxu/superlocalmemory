@@ -19,7 +19,7 @@ from superlocalmemory.graph.cozo_backend import _COZO_AVAILABLE, CozoDBGraphBack
 
 pytestmark = pytest.mark.skipif(
     not _COZO_AVAILABLE,
-    reason="CozoDB optional dependency not installed (pip install superlocalmemory[cozo])",
+    reason="CozoDB optional dependency not installed (pip install mslm-memory[cozo])",
 )
 
 

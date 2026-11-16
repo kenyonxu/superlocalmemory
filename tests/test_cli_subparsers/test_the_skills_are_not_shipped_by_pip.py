@@ -9,7 +9,7 @@ The skills, agents and commands live in the editor's plugin channel — the
 Python distribution. Confirmed against the built wheel: it contains **zero**
 files from ``plugin/``, ``codex-plugin/`` or ``copilot-plugin/``.
 
-So ``pip install --upgrade superlocalmemory`` moves the package and leaves every
+So ``pip install --upgrade mslm-memory`` moves the package and leaves every
 skill exactly where it was. 4.1 changed 76 files and 862 lines across those
 trees. A user who upgraded, read a clean ``slm doctor``, and reasonably concluded
 they had the whole release, had no way to discover otherwise — the word "plugin"

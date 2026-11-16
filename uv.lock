@@ -1496,7 +1496,7 @@ wheels = [
 
 [[package]]
 name = "mslm-memory"
-version = "4.2.19"
+version = "4.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },

@@ -9,7 +9,7 @@ A LlamaIndex `BaseChatStore` integration for [SuperLocalMemory](https://github.c
 - Supported platforms: Apple Silicon macOS, 64-bit Windows, 64-bit Linux — Intel Mac and 32-bit Windows (Win32) are outside the SuperLocalMemory support contract (`cryptography==50.0.0` has no wheel for those architectures).
 
 ```bash
-python -m pip install superlocalmemory
+python -m pip install mslm-memory
 ```
 
 ## Installation

@@ -114,7 +114,7 @@ def _get_ts_modules() -> tuple[Any, Any]:
     except ImportError as exc:
         raise ImportError(
             "tree-sitter and tree-sitter-language-pack required for parsing. "
-            "Install: pip install 'superlocalmemory[code-graph]'"
+            "Install: pip install 'mslm-memory[code-graph]'"
         ) from exc
     return tree_sitter, get_language
 

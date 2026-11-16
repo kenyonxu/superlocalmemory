@@ -108,6 +108,12 @@ _KNOWN_DEAD: dict[str, str] = {
     "integrations/hermes/tests/conftest.py": "ALIVE — pytest fixture module; the fork "
         "ships the Hermes provider's tests in-src. Loaded by the test runner, "
         "never by production imports",
+    "integrations/hermes/tests/test_cron_hint_guard.py": "ALIVE — in-src provider "
+        "tests (fork layout); exercised by pytest, not imported by production "
+        "code",
+    "integrations/hermes/tests/test_packageless_gateway.py": "ALIVE — in-src provider "
+        "tests (fork layout); exercised by pytest, not imported by production "
+        "code",
     "integrations/hermes/tests/test_provider.py": "ALIVE — in-src provider tests "
         "(fork layout); exercised by pytest, not imported by production code",
     "learning/bootstrap.py": "seeded 4.0.6 — triage",

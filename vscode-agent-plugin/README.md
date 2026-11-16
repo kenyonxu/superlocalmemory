@@ -8,7 +8,7 @@ Everything is stored in a local database in your home folder (`~/.superlocalmemo
 ## Install
 
 ```bash
-npm install -g superlocalmemory
+npm install -g mslm-memory
 claude plugin marketplace add qualixar/superlocalmemory
 claude plugin install superlocalmemory@qualixar
 ```

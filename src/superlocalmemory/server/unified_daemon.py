@@ -2222,7 +2222,7 @@ async def lifespan(application: FastAPI):
     try:
         try:
             from importlib.metadata import version as _pkg_version
-            _slm_version = _pkg_version("superlocalmemory")
+            _slm_version = _pkg_version("mslm-memory")
         except Exception:
             _slm_version = "unknown"
         _version_marker = state_path(".last_version")

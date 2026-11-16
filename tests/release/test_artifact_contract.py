@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import email.parser
+import fnmatch
 import tarfile
+import tomllib
 import zipfile
 
 import pytest
@@ -17,6 +19,23 @@ from ._harness import (
 )
 
 pytestmark = pytest.mark.slow
+
+#: In-src test trees that package discovery excludes (pyproject.toml
+#: [tool.setuptools.packages.find] exclude). They stay in the checkout for
+#: pytest but never ship: ``forbidden_wheel_names`` rejects any wheel member
+#: whose path contains "tests", so the every-module contracts below must
+#: define "every module" as "every non-test module". Mirrored one-for-one with
+#: the pyproject exclude list; test_packaging_discovery_excludes_in_src_test_trees
+#: fails the release when the two lists drift apart.
+_IN_SRC_TEST_TREES = ("superlocalmemory/integrations/hermes/tests",)
+
+
+def _is_in_src_test_tree(relative_to_src: str) -> bool:
+    """True for paths inside an excluded in-src test tree."""
+    return any(
+        relative_to_src == tree or relative_to_src.startswith(f"{tree}/")
+        for tree in _IN_SRC_TEST_TREES
+    )
 
 
 def _sdist_prefix(artifacts: BuiltArtifacts) -> str:
@@ -57,8 +76,12 @@ def test_wheel_contains_every_python_module_and_ui_asset(
     names = wheel_names(built_artifacts.wheel)
     source_root = built_artifacts.snapshot / "src" / "superlocalmemory"
     expected_python = {
-        path.relative_to(source_root.parent).as_posix()
-        for path in source_root.rglob("*.py")
+        rel
+        for rel in (
+            path.relative_to(source_root.parent).as_posix()
+            for path in source_root.rglob("*.py")
+        )
+        if not _is_in_src_test_tree(rel)
     }
     expected_ui = {
         path.relative_to(source_root.parent).as_posix()
@@ -82,9 +105,13 @@ def test_sdist_contains_every_python_module_and_ui_asset(
     prefix = _sdist_prefix(built_artifacts)
     source_root = built_artifacts.snapshot / "src" / "superlocalmemory"
     expected_python = {
-        f"{prefix}/src/{path.relative_to(source_root.parent).as_posix()}"
-        for path in source_root.rglob("*")
-        if path.is_file() and path.suffix == ".py"
+        f"{prefix}/src/{rel}"
+        for rel in (
+            path.relative_to(source_root.parent).as_posix()
+            for path in source_root.rglob("*")
+            if path.is_file() and path.suffix == ".py"
+        )
+        if not _is_in_src_test_tree(rel)
     }
     expected_ui = {
         f"{prefix}/src/{path.relative_to(source_root.parent).as_posix()}"
@@ -159,7 +186,9 @@ def test_wheel_metadata_and_console_entry_point(
 ) -> None:
     metadata = _wheel_metadata(built_artifacts)
     normalized_filename = built_artifacts.wheel.name.replace("-", "_").lower()
-    assert metadata["Name"].lower() == "superlocalmemory"
+    # Fork identity (4.3.0): the distribution is mslm-memory; the imported
+    # module keeps the name superlocalmemory.
+    assert metadata["Name"].lower() == "mslm-memory"
     assert metadata["Version"].replace("-", "_").lower() in normalized_filename
     assert set(metadata["Requires-Python"].split(",")) == {">=3.12", "<3.15"}
 
@@ -168,3 +197,31 @@ def test_wheel_metadata_and_console_entry_point(
         assert len(entry_names) == 1
         entries = archive.read(entry_names[0]).decode("utf-8")
     assert "slm = superlocalmemory.cli.main:main" in entries
+
+
+def test_packaging_discovery_excludes_in_src_test_trees(
+    built_artifacts: BuiltArtifacts,
+) -> None:
+    """Every in-src test tree above must be excluded by package discovery.
+
+    The wheel omits these files because pyproject.toml excludes them from
+    package discovery, not because this file filters them out of the expected
+    set. If the two lists drift, a future in-src tests directory would ship in
+    the wheel (this contract's forbidden-names test would then be the only
+    defense) — or the every-module contract would be unsatisfiable, exactly the
+    4.2.19-era state this split replaces. The reverse direction needs no guard:
+    an EXTRA pyproject exclude drops a module the every-module contract still
+    expects, which fails the wheel test above.
+    """
+    with (built_artifacts.snapshot / "pyproject.toml").open("rb") as stream:
+        pyproject = tomllib.load(stream)
+    excluded = pyproject["tool"]["setuptools"]["packages"]["find"]["exclude"]
+    uncovered = [
+        tree
+        for tree in (t.replace("/", ".") for t in _IN_SRC_TEST_TREES)
+        if not any(fnmatch.fnmatch(tree, pattern) for pattern in excluded)
+    ]
+    assert not uncovered, (
+        f"pyproject [tool.setuptools.packages.find] exclude does not cover "
+        f"in-src test trees: {uncovered}"
+    )

@@ -53,7 +53,7 @@ Adapter settings live in `adapters.json` in the data root (`~/.superlocalmemory/
 
 The transcript adapter has no default folder. If `watch_dir` is missing the adapter prints "No watch_dir configured. Set it in ~/.superlocalmemory/adapters.json" and exits. The `import` folder used for automatic mbox and ics discovery is not created for you; make `~/.superlocalmemory/import/` yourself if you want to drop files there instead of setting a path.
 
-The `keyring` and `watchdog` packages are base dependencies. The Google client libraries and `icalendar` come with the optional `ingestion` extra (also part of `full`): `pip install 'superlocalmemory[ingestion]'`. Without the extra, the OAuth tiers log a warning and return nothing, and the `.ics` path falls back to the small parser.
+The `keyring` and `watchdog` packages are base dependencies. The Google client libraries and `icalendar` come with the optional `ingestion` extra (also part of `full`): `pip install 'mslm-memory[ingestion]'`. Without the extra, the OAuth tiers log a warning and return nothing, and the `.ics` path falls back to the small parser.
 
 ## Commands
 
@@ -84,6 +84,6 @@ What to do today: use the Takeout `.mbox` route for Gmail, an exported `.ics` fo
 
 ## Where to look when it does nothing
 
-If `slm adapters list` shows `enabled` but never `running`, run `slm adapters start <name>` and read `logs/adapter-<name>.log`. The common messages are "MBOX file not found" (wrong `mbox_path`), "No Gmail credentials or MBOX file found", "Watch directory does not exist", and "Gmail OAuth requires: pip install 'superlocalmemory[ingestion]'". If an import "finished" with fewer memories than messages, check the hourly limit described above and start the adapter again. Daemon problems are covered in [Troubleshooting](Troubleshooting).
+If `slm adapters list` shows `enabled` but never `running`, run `slm adapters start <name>` and read `logs/adapter-<name>.log`. The common messages are "MBOX file not found" (wrong `mbox_path`), "No Gmail credentials or MBOX file found", "Watch directory does not exist", and "Gmail OAuth requires: pip install 'mslm-memory[ingestion]'". If an import "finished" with fewer memories than messages, check the hourly limit described above and start the adapter again. Daemon problems are covered in [Troubleshooting](Troubleshooting).
 
 Code: `src/superlocalmemory/ingestion/` (`adapter_manager.py`, `base_adapter.py`, `gmail_adapter.py`, `calendar_adapter.py`, `transcript_adapter.py`, `parsers.py`, `credentials.py`), `server/routes/ingest.py`, `server/routes/adapters.py`, `ui/js/ng-ingestion.js`.

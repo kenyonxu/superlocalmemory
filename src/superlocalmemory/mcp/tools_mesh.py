@@ -5,7 +5,7 @@
 """SLM Mesh MCP Tools — P2P agent communication via the unified daemon.
 
 v3.4.4: These tools ship WITH SuperLocalMemory, no separate slm-mesh install needed.
-End users get full mesh functionality from `pip install superlocalmemory`.
+End users get full mesh functionality from `pip install mslm-memory`.
 
 All tools communicate with the daemon's Python mesh broker on port 8765.
 Auto-heartbeat keeps the session alive as long as the MCP server is running.

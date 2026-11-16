@@ -90,8 +90,15 @@ def test_changelog_starts_with_the_current_package_version() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     expected = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    latest = re.search(r"^## \[([^]]+)]", changelog, re.MULTILINE)
+    # Fork releases head the file with "## mslm X.Y.Z — ..." entries; upstream
+    # merges keep the "## [X.Y.Z]" style. The gate reads the FIRST release
+    # heading of either style and requires it to be the package version.
+    latest = re.search(
+        r"^## (?:\[([^]]+)]|mslm (\d+(?:\.\d+)+) \u2014)",
+        changelog,
+        re.MULTILINE,
+    )
 
     assert expected is not None
     assert latest is not None
-    assert latest.group(1) == expected.group(1)
+    assert (latest.group(1) or latest.group(2)) == expected.group(1)

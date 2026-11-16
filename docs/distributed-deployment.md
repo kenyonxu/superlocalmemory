@@ -7,13 +7,13 @@ This guide covers running SLM in distributed environments: multiple containers, 
 ## Quick start (single host)
 
 ```bash
-npm install -g superlocalmemory
+npm install -g mslm-memory
 slm setup
 slm serve start   # or: systemctl start slm-http
 ```
 
 Python deployments can instead create and activate a dedicated virtual
-environment, then run `python -m pip install superlocalmemory` before setup.
+environment, then run `python -m pip install mslm-memory` before setup.
 
 For multi-container setups, read on.
 

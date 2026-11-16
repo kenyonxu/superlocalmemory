@@ -76,7 +76,7 @@ def _get_ts_modules() -> tuple[Any, Any, Any]:
         raise ImportError(
             "tree-sitter and tree-sitter-language-pack are required for "
             "code graph parsing. Install with: "
-            "pip install 'superlocalmemory[code-graph]'"
+            "pip install 'mslm-memory[code-graph]'"
         ) from exc
     return tree_sitter, get_language, None
 

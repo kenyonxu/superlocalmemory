@@ -33,7 +33,7 @@ SQLCipher (page-level AES on the SQLite file) is the usual "encrypt the DB
 file" answer, but for this product it is **not** the default because:
 
 * It requires a non-stdlib driver (`pysqlcipher3`) and a SQLCipher build,
-  breaking the zero-dependency `pip install superlocalmemory` promise 
+  breaking the zero-dependency `pip install mslm-memory` promise 
 * The key must live *somewhere* on the same machine the daemon runs on; without
   a hardware keystore this mostly re-implements what FileVault/LUKS already do
   at the block layer, with worse performance and more moving parts.

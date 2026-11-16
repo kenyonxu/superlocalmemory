@@ -151,9 +151,9 @@ def _format_install_block(installs: list) -> str:
         return ""
 
     _upgrade_hints = {
-        "pipx": "  pipx upgrade superlocalmemory",
-        "venv": "  pip install -U superlocalmemory  (in ~/.slm-venv)",
-        "npm": "  npm install -g superlocalmemory@latest",
+        "pipx": "  pipx upgrade mslm-memory",
+        "venv": "  pip install -U mslm-memory  (in ~/.slm-venv)",
+        "npm": "  npm install -g mslm-memory@latest",
     }
 
     lines = ["\nAll detected installs:"]

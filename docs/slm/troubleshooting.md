@@ -69,10 +69,10 @@ winget install Python.Python.3.12
 mkdir -p ~/.npm-global
 npm config set prefix '~/.npm-global'
 export PATH=~/.npm-global/bin:$PATH
-npm install -g superlocalmemory
+npm install -g mslm-memory
 
 # Option 2: Use sudo (not recommended)
-sudo npm install -g superlocalmemory
+sudo npm install -g mslm-memory
 ```
 
 ## Recall Issues
@@ -246,8 +246,8 @@ The MCP server failed to start. Common causes:
 
 ```bash
 # Reinstall
-npm uninstall -g superlocalmemory
-npm install -g superlocalmemory
+npm uninstall -g mslm-memory
+npm install -g mslm-memory
 
 # Verify
 slm status

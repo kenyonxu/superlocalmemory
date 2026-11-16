@@ -18,7 +18,7 @@ The SLM engine is a separate open-source project (AGPL-3.0-or-later): https://gi
 
 ## Setup (once per computer)
 
-1. Install the engine: `npm install -g superlocalmemory` (or `pipx install superlocalmemory`). This provides the `slm` command.
+1. Install the engine: `npm install -g mslm-memory` (or `pipx install mslm-memory`). This provides the `slm` command.
 2. Connect OpenClaw: `slm connect openclaw`. This adds the `superlocalmemory` MCP server (command `slm`, argument `mcp`) under `mcp.servers` in `~/.openclaw/openclaw.json`. If that file uses JSON5 syntax, run instead: `openclaw mcp add superlocalmemory --command slm --arg mcp`.
 3. Restart OpenClaw. Check the setup with `slm doctor`.
 

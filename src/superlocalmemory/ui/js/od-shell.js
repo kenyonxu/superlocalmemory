@@ -142,7 +142,7 @@
   var LINKS = {
     repo:     'https://github.com/qualixar/superlocalmemory',
     npm:      'https://www.npmjs.com/package/superlocalmemory',
-    pip:      'https://pypi.org/project/superlocalmemory/',
+    pip:      'https://pypi.org/project/mslm-memory/',
     qualixar: 'https://qualixar.com',
     author:   'https://varunpratap.com',
     license:  'https://github.com/qualixar/superlocalmemory/blob/main/LICENSE',

@@ -13,7 +13,7 @@ it stays local.
 "auto" means Laya only when an install was set up and passed its check (the
 dashboard or setup path, ``laya_runtime.detect`` reporting it ready) —
 otherwise nothing. A ``laya_mlx`` that merely happens to be importable from
-SLM's own environment (``pip install "superlocalmemory[full]"``) does not turn
+SLM's own environment (``pip install "mslm-memory[full]"``) does not turn
 it on; choosing "laya" by name does. "auto" never means Jev: the question and
 the top memories leave the machine only when someone chose that, stored a key
 and accepted it.

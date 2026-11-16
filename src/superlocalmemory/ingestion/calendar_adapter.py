@@ -335,7 +335,7 @@ class CalendarAdapter(BaseAdapter):
             return items
 
         except ImportError:
-            logger.warning("Calendar OAuth requires: pip install 'superlocalmemory[ingestion]'")
+            logger.warning("Calendar OAuth requires: pip install 'mslm-memory[ingestion]'")
             return []
         except Exception as exc:
             logger.warning("Calendar OAuth failed: %s", exc)

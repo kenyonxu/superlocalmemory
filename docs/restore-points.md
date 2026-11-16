@@ -74,7 +74,7 @@ previous release without losing anything:
 ```bash
 slm db prepare-downgrade
 # it names the version to go back to and prints the exact command, for example:
-pipx install --force "superlocalmemory==<version>"   # or: npm install -g superlocalmemory@<version>
+pipx install --force "mslm-memory==<version>"   # or: npm install -g mslm-memory@<version>
 ```
 
 You confirm by typing `DOWNGRADE` (or pass `--yes`). Preparation is allowed

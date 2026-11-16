@@ -13,13 +13,13 @@ The extension itself contains no memory logic. It finds the `slm` command and ha
 Install the SuperLocalMemory engine first. The extension does not install it for you.
 
 ```
-npm install -g superlocalmemory
+npm install -g mslm-memory
 ```
 
 or
 
 ```
-pipx install superlocalmemory
+pipx install mslm-memory
 ```
 
 You need VS Code 1.101 or later, which is the first release with the extension MCP API. The extension looks for `slm` on your PATH and then in common install folders (`~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, and the npm global folder on Windows). If it cannot find the command, it shows a message with an "Install instructions" button that opens https://superlocalmemory.com. After installing, return to VS Code; if the server does not appear, run "Developer: Reload Window".

@@ -137,7 +137,7 @@ class CodeGraphWatcher:
             from watchdog.observers import Observer
         except ImportError:
             raise ImportError(
-                "watchdog not installed. Install with: pip install superlocalmemory[code-graph]"
+                "watchdog not installed. Install with: pip install mslm-memory[code-graph]"
             )
 
         def _on_changes(paths: list[str]) -> None:

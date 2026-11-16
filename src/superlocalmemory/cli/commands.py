@@ -3254,7 +3254,7 @@ def _slm_version() -> str:
     """The installed package version, or "unknown"."""
     try:
         from importlib.metadata import version
-        return version("superlocalmemory")
+        return version("mslm-memory")
     except Exception:  # noqa: BLE001
         return "unknown"
 
@@ -3564,7 +3564,7 @@ def _cmd_doctor_checks(args: Namespace, state: dict) -> None:
     else:
         missing = set(search_mods) - set(search_ok)
         _check("Search deps", "WARN", f"Missing: {', '.join(missing)}",
-               "pip install 'superlocalmemory[search]'")
+               "pip install 'mslm-memory[search]'")
 
     _stage("Dashboard deps")
     # 4. Dashboard deps
@@ -3664,7 +3664,7 @@ def _cmd_doctor_checks(args: Namespace, state: dict) -> None:
             _check(
                 "Embedding worker", "FAIL",
                 "embedding_worker module not found",
-                "Reinstall: npm install -g superlocalmemory",
+                "Reinstall: npm install -g mslm-memory",
             )
         except Exception as exc:
             _check("Embedding worker", "FAIL", str(exc), "slm warmup")
@@ -3952,11 +3952,11 @@ def _cmd_doctor_checks(args: Namespace, state: dict) -> None:
                 "WARN",
                 _detail,
                 fix="Upgrade all installs: "
-                    "pipx upgrade superlocalmemory  |  "
-                    "npm rebuild superlocalmemory (refreshes its pinned wheel; "
+                    "pipx upgrade mslm-memory  |  "
+                    "npm rebuild mslm-memory (refreshes its pinned wheel; "
                     "never pip-install inside an npm-owned .slm-venv by hand)  |  "
                     "standalone ~/.slm-venv: activate it, then "
-                    "pip install -U superlocalmemory",
+                    "pip install -U mslm-memory",
             )
         else:
             _unified = next(iter(_versions))
@@ -3987,7 +3987,7 @@ def _cmd_doctor_checks(args: Namespace, state: dict) -> None:
                     f"npm wrapper is {i.get('version')} but its private venv "
                     f"still holds wheel {_wheel_version} "
                     f"({i.get('resolved') or 'unresolved path'})",
-                    fix="npm rebuild superlocalmemory "
+                    fix="npm rebuild mslm-memory "
                         "(refreshes the pinned wheel; never pip-install "
                         "inside an npm-owned .slm-venv by hand)",
                 )

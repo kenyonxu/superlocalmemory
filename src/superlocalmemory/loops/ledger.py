@@ -291,7 +291,7 @@ def open_engine_store(db_path: str | Path) -> _EngineLedgerStore:
     except ImportError as exc:  # pragma: no cover - defensive
         raise ImportError(
             "SuperLocalMemory runtime is required for the SLM-backed loop "
-            "ledger. Install it with: python -m pip install superlocalmemory."
+            "ledger. Install it with: python -m pip install mslm-memory."
         ) from exc
 
     path = Path(db_path).expanduser().resolve()

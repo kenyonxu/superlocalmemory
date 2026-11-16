@@ -33,11 +33,11 @@ Python 3.12 to 3.14, and Node.js 18 or later if you install with npm. For Mode B
 ### How do I install and update it?
 
 ```bash
-npm install -g superlocalmemory
+npm install -g mslm-memory
 slm setup
 ```
 
-To update, run `npm install -g superlocalmemory@latest` (or the equivalent for pipx or pip), then `slm restart` and `slm doctor`. Your data folder is never touched by installing or updating. Refresh host integrations with `slm upgrade-hosts` ([Host Integration Upgrades](Host-Upgrades)).
+To update, run `npm install -g mslm-memory@latest` (or the equivalent for pipx or pip), then `slm restart` and `slm doctor`. Your data folder is never touched by installing or updating. Refresh host integrations with `slm upgrade-hosts` ([Host Integration Upgrades](Host-Upgrades)).
 
 ## Using it
 

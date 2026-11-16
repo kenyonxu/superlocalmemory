@@ -84,5 +84,5 @@ def test_contributor_and_integration_guidance_uses_supported_paths() -> None:
 
     assert "./scripts/install.sh" in contributing
     assert r".\scripts\install.ps1" in contributing
-    assert "pip install superlocalmemory" in llama_readme
-    assert "pip install superlocalmemory" in llama_runtime_error
+    assert "pip install mslm-memory" in llama_readme
+    assert "pip install mslm-memory" in llama_runtime_error

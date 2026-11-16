@@ -167,21 +167,53 @@ def _is_cron_hint(text: str) -> bool:
 _DEFAULT_DAEMON_PORT = 8765
 _DAEMON_HEALTH_TIMEOUT = 2.0
 
+#: Cache for the by-path canonical resolver (see ``_slm_state_dir``).
+_data_root_resolver: object | None = None
+
+
+def _load_data_root_resolver():
+    """Load ``infra/data_root.py`` by path, not by package import.
+
+    The packageless-gateway contract (tests/.../test_packageless_gateway.py)
+    keeps ``superlocalmemory.*`` unimportable, and a direct file load is not
+    subject to that import block while still running the one canonical
+    resolver. ``data_root.py`` is stdlib-only by design, so it executes
+    standalone. Returns None when the file is unreachable (provider copied
+    elsewhere alone); the single caller then falls back to the default port.
+    """
+    global _data_root_resolver
+    if _data_root_resolver is not None:
+        return _data_root_resolver
+    import importlib.util
+
+    resolver_path = Path(__file__).resolve().parents[2] / "infra" / "data_root.py"
+    spec = importlib.util.spec_from_file_location("_slm_hermes_data_root", resolver_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _data_root_resolver = module
+    return module
+
 
 def _slm_state_dir() -> Path:
-    """The daemon's state directory, env overrides first (data_root order)."""
-    env = (
-        os.environ.get("SLM_DATA_DIR")
-        or os.environ.get("SL_MEMORY_PATH")
-        or os.environ.get("SLM_HOME")
-    )
-    if env:
-        return Path(env).expanduser()
-    return Path.home() / ".superlocalmemory"
+    """The daemon's state directory, via the one canonical data-root authority.
+
+    ``infra/data_root.py`` owns this decision (env aliases first, then the
+    legacy ``config.json:base_dir`` relocation, then the implicit default
+    root). Resolving it here by hand made this module a second authority that
+    missed relocated roots; the canonical-data-root guard exists to keep that
+    from coming back.
+    """
+    resolver = _load_data_root_resolver()
+    return resolver.canonical_data_root()  # type: ignore[union-attr]
 
 
 def _daemon_port() -> int:
-    state = _slm_state_dir()
+    try:
+        state = _slm_state_dir()
+    except Exception:  # resolver unreachable -> probe the default port
+        return _DEFAULT_DAEMON_PORT
     try:
         first_line = (
             (state / "daemon.port").read_text(encoding="utf-8").strip().splitlines()[0]

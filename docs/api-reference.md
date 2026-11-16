@@ -7,7 +7,7 @@ package, which owns its private Python runtime.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install superlocalmemory
+python -m pip install mslm-memory
 ```
 
 Do not add paths from an npm installation to `sys.path`. The npm wrapper owns a

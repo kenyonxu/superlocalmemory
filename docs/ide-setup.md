@@ -121,7 +121,7 @@ its own copy. Install it before enabling the plugin, and confirm `slm` is on
 PATH:
 
 ```powershell
-pipx install superlocalmemory   # or: pip install superlocalmemory
+pipx install mslm-memory   # or: pip install mslm-memory
 slm --version
 ```
 

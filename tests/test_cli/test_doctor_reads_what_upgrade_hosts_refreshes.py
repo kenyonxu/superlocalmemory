@@ -25,7 +25,7 @@ from superlocalmemory.hooks import codex_assets
 def _package_version() -> str:
     from importlib.metadata import version
 
-    return version("superlocalmemory")
+    return version("mslm-memory")
 
 
 @pytest.fixture

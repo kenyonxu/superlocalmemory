@@ -33,7 +33,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
         """Get SuperLocalMemory version, Python version, and platform info."""
         try:
             from importlib.metadata import version as _pkg_version
-            slm_ver = _pkg_version("superlocalmemory")
+            slm_ver = _pkg_version("mslm-memory")
         except Exception:
             slm_ver = "unknown"
         import platform

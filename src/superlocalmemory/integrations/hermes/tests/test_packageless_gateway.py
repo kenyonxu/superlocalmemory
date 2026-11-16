@@ -94,7 +94,9 @@ def fake_daemon(tmp_path: Path):
     thread.start()
     state_dir = tmp_path / "slm-state"
     state_dir.mkdir()
-    (state_dir / "daemon.port").write_text(str(server.server_port) + "\n")
+    (state_dir / "daemon.port").write_text(
+        str(server.server_port) + "\n", encoding="utf-8"
+    )
     try:
         yield {"server": server, "state_dir": state_dir,
                "port": server.server_port}

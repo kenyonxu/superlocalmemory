@@ -2,7 +2,7 @@
 
 [OpenCode](https://opencode.ai) can connect to SuperLocalMemory through its
 standard local MCP server entry. Install SLM first (`npm install -g
-superlocalmemory` or `pipx install superlocalmemory`, see
+superlocalmemory` or `pipx install mslm-memory`, see
 [getting started](getting-started.md)).
 
 ## Quick setup

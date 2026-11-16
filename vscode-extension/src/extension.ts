@@ -106,7 +106,7 @@ async function showMissingMessage(): Promise<void> {
   warned = true;
   const open = 'Install instructions';
   const choice = await vscode.window.showWarningMessage(
-    'SuperLocalMemory: the "slm" command was not found. Install the engine (npm install -g superlocalmemory, or pipx install superlocalmemory), then reload the window.',
+    'SuperLocalMemory: the "slm" command was not found. Install the engine (npm install -g mslm-memory, or pipx install mslm-memory), then reload the window.',
     open,
   );
   if (choice === open) {

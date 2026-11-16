@@ -341,7 +341,7 @@ class GmailAdapter(BaseAdapter):
             return items
 
         except ImportError:
-            logger.warning("Gmail OAuth requires: pip install 'superlocalmemory[ingestion]'")
+            logger.warning("Gmail OAuth requires: pip install 'mslm-memory[ingestion]'")
             return []
         except Exception as exc:
             logger.warning("Gmail OAuth polling failed: %s", exc)

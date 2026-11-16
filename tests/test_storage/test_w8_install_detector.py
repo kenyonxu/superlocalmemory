@@ -236,7 +236,7 @@ class TestSchemaVersionErrorNamesAllInstalls:
                 check_version_or_raise(db)
 
         msg = str(exc_info.value)
-        assert "pipx upgrade superlocalmemory" in msg or "pipx" in msg
+        assert "pipx upgrade mslm-memory" in msg or "pipx" in msg
 
     def test_error_message_when_no_installs_detected(self, tmp_path):
         """SchemaVersionError still raises cleanly when no installs detected."""

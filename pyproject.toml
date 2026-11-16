@@ -1,6 +1,6 @@
 [project]
 name = "mslm-memory"
-version = "4.2.19"
+version = "4.3.0"
 description = "The governed memory brain for AI agents: one local memory for Claude Code, Codex, Cursor, Copilot, ChatGPT and any MCP client"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -100,7 +100,7 @@ dependencies = [
     "pycozo[embedded]==0.3.0; sys_platform != 'linux' or platform_machine != 'aarch64'",
     "pycozo[embedded]==0.7.6; sys_platform == 'linux' and platform_machine == 'aarch64'",
     # v3.6.10: LLMLingua-2 prose compression (aggressive mode, opt-in at runtime).
-    # Hard dependency so `pip install superlocalmemory` ships compression-ready;
+    # Hard dependency so `pip install mslm-memory` ships compression-ready;
     # the ~560MB model downloads on first setup/warmup (fail-open). Verified the
     # pin does NOT disturb the transformers/torch/numpy pins above.
     "llmlingua==0.2.2",
@@ -126,7 +126,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # `search` is now a no-op alias kept for backwards compatibility; the deps
-# moved into core in v3.4.18. ``pip install superlocalmemory[search]`` still
+# moved into core in v3.4.18. ``pip install mslm-memory[search]`` still
 # works but installs nothing extra.
 search = [
     # Same hard pin as core deps — no [onnx] extra.
@@ -210,6 +210,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+# In-src test trees stay in the checkout for pytest but must never ship: the
+# artifact contract (tests/release/test_artifact_contract.py) rejects any wheel
+# member whose path contains "tests". Keep that file's _IN_SRC_TEST_TREES
+# mirror of this list in sync — test_packaging_discovery_excludes_in_src_test_trees
+# fails the release if the two drift apart.
+exclude = ["superlocalmemory.integrations.hermes.tests*"]
 
 [tool.setuptools.package-data]
 superlocalmemory = ["ui/**/*", "optimize/NOTICE", "contracts/schemas/*.json", "runtimes/locks/*.txt",

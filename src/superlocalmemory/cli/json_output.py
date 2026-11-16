@@ -43,7 +43,7 @@ def _get_version() -> str:
     # 3. importlib.metadata fallback
     try:
         from importlib.metadata import version
-        return version("superlocalmemory")
+        return version("mslm-memory")
     except Exception:
         pass
     return "unknown"

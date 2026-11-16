@@ -42,7 +42,7 @@ def _data_root() -> Path:
 
 # ``SLM_INSTALL_DIR`` is legacy installer metadata only. It is deliberately
 # never added to ``sys.path``. Install the V3 runtime with:
-# ``python -m pip install superlocalmemory``.
+# ``python -m pip install mslm-memory``.
 
 # Constants
 # ---------------------------------------------------------------------------

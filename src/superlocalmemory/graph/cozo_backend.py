@@ -56,7 +56,7 @@ class CozoDBError(Exception):
 
 
 class CozoDBNotAvailable(CozoDBError):
-    """CozoDB not installed. Install with: pip install superlocalmemory[cozo]"""
+    """CozoDB not installed. Install with: pip install mslm-memory[cozo]"""
 
 
 class CozoDBConnectionError(CozoDBError):
@@ -137,7 +137,7 @@ class CozoDBGraphBackend:
     def __init__(self, db_path: str) -> None:
         if not _pycozo_spec_present():
             raise CozoDBNotAvailable(
-                "CozoDB not installed. Run: pip install superlocalmemory[cozo]"
+                "CozoDB not installed. Run: pip install mslm-memory[cozo]"
             )
         # Lazy import: only construct-time loads the native binding.
         from pycozo.client import Client as _CozoClient  # noqa: PLC0415

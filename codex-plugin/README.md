@@ -2,7 +2,7 @@
 
 Local-first agent memory + reversible context compression for OpenAI Codex CLI.
 
-SuperLocalMemory v4.2.19 · Qualixar · AGPL-3.0-or-later
+SuperLocalMemory v4.3.0 · Qualixar · AGPL-3.0-or-later
 
 ---
 
@@ -24,9 +24,9 @@ SuperLocalMemory v4.2.19 · Qualixar · AGPL-3.0-or-later
 - **SuperLocalMemory installed:**
 
   ```bash
-  pip install superlocalmemory   # global
+  pip install mslm-memory   # global
   # or
-  pipx install superlocalmemory  # isolated (recommended)
+  pipx install mslm-memory  # isolated (recommended)
   ```
 
 - Verify: `slm --version`
@@ -135,7 +135,7 @@ tools), use the provided launcher script instead of the bare `slm` binary.
 
    ```bash
    python3 -m venv ~/.superlocalmemory/venv
-   ~/.superlocalmemory/venv/bin/pip install superlocalmemory
+   ~/.superlocalmemory/venv/bin/pip install mslm-memory
    ```
 
 2. Update `.codex/config.toml` to use the launcher:
@@ -193,7 +193,7 @@ Add them manually once you know your Codex version's tool names.
 
 ## Troubleshooting
 
-**`slm: command not found`** — SLM is not on PATH. Run `pip install superlocalmemory` or
+**`slm: command not found`** — SLM is not on PATH. Run `pip install mslm-memory` or
 use the venv launcher.
 
 **MCP server not appearing in Codex** — Confirm `.codex/config.toml` is in your project
@@ -204,4 +204,4 @@ root (not inside a subdirectory), then restart Codex.
 
 ---
 
-SuperLocalMemory v4.2.19 · Qualixar · https://github.com/qualixar/superlocalmemory
+SuperLocalMemory v4.3.0 · Qualixar · https://github.com/qualixar/superlocalmemory

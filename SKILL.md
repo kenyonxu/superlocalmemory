@@ -1,7 +1,7 @@
 ---
 name: superlocalmemory
 description: "AI agent memory with mathematical foundations. Store, recall, search, and manage memories locally. Local data root; optional networked features have separate behavior."
-version: "4.2.19"
+version: "4.3.0"
 author: "Varun Pratap Bhardwaj"
 license: AGPL-3.0-or-later
 homepage: https://superlocalmemory.com
@@ -27,9 +27,9 @@ AI agent memory with a local data root. Five candidate producers (semantic, BM25
 ## Installation
 
 ```bash
-pip install superlocalmemory
+pip install mslm-memory
 # or
-npm install -g superlocalmemory
+npm install -g mslm-memory
 ```
 
 ## Quick Start

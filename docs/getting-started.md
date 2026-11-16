@@ -45,7 +45,7 @@ cross-client behavior for every product that implements MCP.
 > **Linux / Ubuntu 22.04:** Install in a venv to avoid system-Python conflicts:
 > ```bash
 > python3.12 -m venv ~/.slm-venv && source ~/.slm-venv/bin/activate
-> python -m pip install superlocalmemory
+> python -m pip install mslm-memory
 > ```
 > Then set `SLM_PYTHON=~/.slm-venv/bin/python` so `slm` uses that interpreter.
 >
@@ -84,8 +84,8 @@ installs SLM, sets it up, starts it, connects the AI tools it finds and opens th
 **npm** (the primary route):
 
 ```bash
-npm install -g superlocalmemory           # text memory
-npm install -g superlocalmemory --media   # text memory, plus pictures and documents
+npm install -g mslm-memory           # text memory
+npm install -g mslm-memory --media   # text memory, plus pictures and documents
 ```
 
 **pip** in a virtual environment, as shown under Prerequisites above.

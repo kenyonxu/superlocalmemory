@@ -54,7 +54,7 @@ class LanceDBError(Exception):
 
 
 class LanceDBNotAvailable(LanceDBError):
-    """LanceDB not installed. Install with: pip install superlocalmemory[lancedb]"""
+    """LanceDB not installed. Install with: pip install mslm-memory[lancedb]"""
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ class LanceDBVectorBackend:
         # Re-check at construct time so a late install still works.
         if not _lancedb_spec_present():
             raise LanceDBNotAvailable(
-                "LanceDB not installed. Run: pip install superlocalmemory[lancedb]"
+                "LanceDB not installed. Run: pip install mslm-memory[lancedb]"
             )
         # Lazy import: only construct-time starts the native runtime.
         import lancedb  # noqa: PLC0415

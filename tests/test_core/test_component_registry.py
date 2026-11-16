@@ -90,7 +90,7 @@ def test_search_deps_never_background_auto_installed(monkeypatch):
     comp = cr.probe_search_deps()
     assert comp.status == cr.STATUS_MISSING
     assert comp.auto_fixable is False
-    assert "superlocalmemory[search]" in comp.fix_cmd
+    assert "mslm-memory[search]" in comp.fix_cmd
 
 
 def test_compressor_never_auto_downloaded(monkeypatch):

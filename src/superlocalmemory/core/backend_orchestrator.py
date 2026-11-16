@@ -535,7 +535,7 @@ class BackendOrchestrator:
                 result["cozo"] = {"status": "error", "error": str(exc)}
         else:
             result["warnings"].append(
-                "CozoDB not active. Install: pip install superlocalmemory[cozo]"
+                "CozoDB not active. Install: pip install mslm-memory[cozo]"
             )
 
         if self._lancedb:
@@ -545,7 +545,7 @@ class BackendOrchestrator:
                 result["lancedb"] = {"status": "error", "error": str(exc)}
         else:
             result["warnings"].append(
-                "LanceDB not active. Install: pip install superlocalmemory[lancedb]"
+                "LanceDB not active. Install: pip install mslm-memory[lancedb]"
             )
 
         outbox = self.outbox_health()

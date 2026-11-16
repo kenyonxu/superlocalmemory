@@ -16,14 +16,14 @@ import sqlite_vec
 
 from superlocalmemory.storage.sqlite_vectors import CanonicalVectorError
 
-# LanceDB is an optional backend (pip install superlocalmemory[lancedb]). When
+# LanceDB is an optional backend (pip install mslm-memory[lancedb]). When
 # it is absent these tests cannot run — skip cleanly instead of erroring at
 # fixture setup, so the suite stays honestly green on installs without it.
 pytestmark = [
     pytest.mark.native,
     pytest.mark.skipif(
         importlib.util.find_spec("lancedb") is None,
-        reason="LanceDB optional dependency not installed (pip install superlocalmemory[lancedb])",
+        reason="LanceDB optional dependency not installed (pip install mslm-memory[lancedb])",
     ),
 ]
 

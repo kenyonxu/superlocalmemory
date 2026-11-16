@@ -212,7 +212,7 @@ def probe_search_deps() -> Component:
         status=STATUS_OK if ok else STATUS_MISSING,
         detail="sentence-transformers, torch, scikit-learn"
         if ok else "missing: " + ", ".join(missing),
-        fix_cmd="" if ok else "pip install 'superlocalmemory[search]'",
+        fix_cmd="" if ok else "pip install 'mslm-memory[search]'",
         # NOT background-auto-installed: torch is ~2GB — a silent multi-GB
         # download is a surprise the user must consent to. Fix command guides
         # them; the daemon does not pull it unasked.

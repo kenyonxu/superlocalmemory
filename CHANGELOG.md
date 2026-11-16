@@ -5,6 +5,10 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## mslm 4.3.0 — release of the upstream-4.2.19-based fork (2026-11-16)
+
+TLS remote listener (:8443), cron four-gate guard, provenance chain (M064), per-request profiles, journal central policy, mcp 2.2.0 security bump; upstream 4.2.7–4.2.19 fully merged.
+
 ## mslm 4.2.19 — fork merge of upstream SuperLocalMemory 4.2.7–4.2.19 (2026-11-16)
 
 Security deps (mcp 2.2.0), purge/erasure fixes, large-store performance, Mode B idle fix; fork patches all retained (spec §4).

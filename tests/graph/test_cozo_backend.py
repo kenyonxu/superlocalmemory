@@ -16,12 +16,12 @@ from superlocalmemory.graph.cozo_backend import (
     CozoDBGraphBackend,
 )
 
-# CozoDB is an optional backend (pip install superlocalmemory[cozo]). When it
+# CozoDB is an optional backend (pip install mslm-memory[cozo]). When it
 # is absent these tests cannot run — skip cleanly instead of erroring at
 # fixture setup, so the suite stays honestly green on installs without it.
 pytestmark = pytest.mark.skipif(
     not _COZO_AVAILABLE,
-    reason="CozoDB optional dependency not installed (pip install superlocalmemory[cozo])",
+    reason="CozoDB optional dependency not installed (pip install mslm-memory[cozo])",
 )
 
 
