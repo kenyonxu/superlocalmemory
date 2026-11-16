@@ -44,9 +44,12 @@ ONBOARDING_DOCS = (
 def test_primary_docs_lead_with_npm_and_activated_venv_pip() -> None:
     for path in (ROOT / "README.md", ROOT / "wiki-content" / "Installation.md"):
         content = path.read_text(encoding="utf-8")
-        npm_position = content.index("npm install -g superlocalmemory")
+        # Anchor to the primary-route install command itself: README's fork note
+        # also mentions `npm install -g mslm-memory` before the Install section.
+        primary_route = content.index("primary route")
+        npm_position = content.index("npm install -g mslm-memory", primary_route)
         venv_position = content.index("python3 -m venv .venv")
-        pip_position = content.index("python -m pip install superlocalmemory", venv_position)
+        pip_position = content.index("python -m pip install mslm-memory", venv_position)
         clone_position = content.index("scripts/install.sh")
 
         assert npm_position < clone_position, path

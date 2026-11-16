@@ -26,7 +26,9 @@
 # window stays open; a failure prints the reason and sets $LASTEXITCODE to 1.
 
 $script:UvInstallUrl = 'https://astral.sh/uv/install.ps1'
-$script:PackageName = 'superlocalmemory'
+# Fork identity (4.3.0): uv installs the published distribution mslm-memory,
+# which provides the `slm` command (module name stays superlocalmemory).
+$script:PackageName = 'mslm-memory'
 $script:DefaultPort = '8765'
 $script:Step = 0
 $script:Total = 7
@@ -178,7 +180,7 @@ function Get-ToolBinDir {
 function Test-AlreadyInstalled {
     if (-not (Test-Command 'uv')) { return $false }
     $listing = (& uv tool list 2>$null | Out-String)
-    return ($listing -match '(?m)^superlocalmemory ')
+    return ($listing -match '(?m)^mslm-memory ')
 }
 
 function Install-Slm {

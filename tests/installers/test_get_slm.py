@@ -28,7 +28,7 @@ UNIX_ONLY = pytest.mark.skipif(
 
 UV_URL = "https://astral.sh/uv/install.sh"
 UV_INSTALL_LINE = f"download {UV_URL}, then run it with sh"
-INSTALL_LINE = "uv tool install --python 3.12 superlocalmemory"
+INSTALL_LINE = "uv tool install --python 3.12 mslm-memory"
 
 SHELLS = ["/bin/sh"] + (["dash"] if shutil.which("dash") else [])
 
@@ -226,18 +226,18 @@ def test_dry_run_uv_absent_with_media(rig_no_uv: Rig) -> None:
 
 @UNIX_ONLY
 def test_already_installed_upgrades_instead(rig_with_uv: Rig) -> None:
-    rig_with_uv.extra_env["UV_LIST_OUTPUT"] = "superlocalmemory v4.2.1\n- slm"
+    rig_with_uv.extra_env["UV_LIST_OUTPUT"] = "mslm-memory v4.2.1\n- slm"
     cmds = dry_commands(rig_with_uv.run().stdout)
-    assert cmds[0] == "uv tool upgrade superlocalmemory"
+    assert cmds[0] == "uv tool upgrade mslm-memory"
     assert INSTALL_LINE not in cmds
 
 
 @UNIX_ONLY
 def test_version_pin_forces_exact_install(rig_with_uv: Rig) -> None:
     rig_with_uv.extra_env["SLM_VERSION"] = "4.2.1"
-    rig_with_uv.extra_env["UV_LIST_OUTPUT"] = "superlocalmemory v4.2.2"
+    rig_with_uv.extra_env["UV_LIST_OUTPUT"] = "mslm-memory v4.2.2"
     cmds = dry_commands(rig_with_uv.run().stdout)
-    assert cmds[0] == "uv tool install --python 3.12 --force superlocalmemory==4.2.1"
+    assert cmds[0] == "uv tool install --python 3.12 --force mslm-memory==4.2.1"
 
 
 @UNIX_ONLY

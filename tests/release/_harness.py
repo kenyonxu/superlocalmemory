@@ -412,7 +412,7 @@ root = pathlib.Path(superlocalmemory.__file__).resolve().parent
 payload = {
     "module_file": str(pathlib.Path(superlocalmemory.__file__).resolve()),
     "identity_file": str(pathlib.Path(daemon_identity.__file__).resolve()),
-    "version": md.version("superlocalmemory"),
+    "version": md.version("mslm-memory"),
     "ui_index": str(root / "ui" / "index.html"),
     "optimize_notice": str(root / "optimize" / "NOTICE"),
     "sys_path": [str(pathlib.Path(p).resolve()) for p in sys.path if p],

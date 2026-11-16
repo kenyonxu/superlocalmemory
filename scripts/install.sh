@@ -8,7 +8,9 @@
 
 set -euo pipefail
 
-readonly PACKAGE_NAME="superlocalmemory"
+# Fork identity (4.3.0): the published distribution is mslm-memory; the CLI
+# entry point stays `slm` and the Python module stays `superlocalmemory`.
+readonly PACKAGE_NAME="mslm-memory"
 
 ACTION="install"
 ACTION_SET=false
@@ -140,7 +142,7 @@ manager_owns_package() {
     esac
 
     printf '%s\n' "$listing" | grep -Eq \
-        '^[[:space:]]*superlocalmemory([[:space:]]|$)'
+        '^[[:space:]]*mslm-memory([[:space:]]|$)'
 }
 
 select_manager() {

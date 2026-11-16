@@ -56,8 +56,8 @@ A Windows version of the script exists in the repository (`scripts/get-slm.ps1`)
 **npm, the shortest terminal route.** This is the primary route: it installs the command globally and builds a private Python environment (`.slm-venv`) inside the package, so it never touches your system Python.
 
 ```bash
-npm install -g superlocalmemory
-npm install -g superlocalmemory --media    # also record a request to turn on pictures and documents
+npm install -g mslm-memory
+npm install -g mslm-memory --media    # also record a request to turn on pictures and documents
 ```
 
 The installer searches for `python3.14`, `python3.13`, `python3.12`, then `python3` and `python`. If your supported interpreter is somewhere unusual, set `SLM_PYTHON` to its path before you run the install. A path that is not a Python 3.12 to 3.14 is refused, and the installer does not quietly pick another.
@@ -65,7 +65,7 @@ The installer searches for `python3.14`, `python3.13`, `python3.12`, then `pytho
 **pipx.** Good if you want an isolated command without npm.
 
 ```bash
-pipx install superlocalmemory
+pipx install mslm-memory
 ```
 
 **pip in a virtual environment, the other primary route.** Use this when you also want the Python API. Keep the environment active whenever you run `slm`.
@@ -73,12 +73,12 @@ pipx install superlocalmemory
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install superlocalmemory
+python -m pip install mslm-memory
 ```
 
 Do not use `sudo pip`, and do not override an externally managed system Python. Do not install the same `slm` command through more than one tool.
 
-**As a uv tool.** If you use [uv](https://docs.astral.sh/uv/), `uv tool install --python 3.12 superlocalmemory` gives SLM its own environment and puts only `slm` on your PATH; nothing needs activating and your system Python is left untouched. Then run `slm setup` and `slm doctor`. Upgrade with `slm serve stop`, `uv tool upgrade superlocalmemory`, then `slm restart`. The Python SDK is not importable from a uv tool environment; use an activated virtual environment for that.
+**As a uv tool.** If you use [uv](https://docs.astral.sh/uv/), `uv tool install --python 3.12 mslm-memory` gives SLM its own environment and puts only `slm` on your PATH; nothing needs activating and your system Python is left untouched. Then run `slm setup` and `slm doctor`. Upgrade with `slm serve stop`, `uv tool upgrade mslm-memory`, then `slm restart`. The Python SDK is not importable from a uv tool environment; use an activated virtual environment for that.
 
 **From a repository clone.** For contributors and researchers. The script delegates to an existing uv or pipx and refuses to run without one.
 
@@ -93,7 +93,7 @@ cd superlocalmemory
 
 **macOS (Apple Silicon).** macOS ships an older Python, so install one first, for example `brew install python@3.12`. The on-device [answer check](Answer-Check) works only here.
 
-**Windows (x64).** Install a 64-bit Python 3.12 to 3.14 first. For the Claude Code plugin on native Windows, install SLM first with `pipx install superlocalmemory` or `python -m pip install superlocalmemory`, so `slm` is on PATH before the plugin starts it.
+**Windows (x64).** Install a 64-bit Python 3.12 to 3.14 first. For the Claude Code plugin on native Windows, install SLM first with `pipx install mslm-memory` or `python -m pip install mslm-memory`, so `slm` is on PATH before the plugin starts it.
 
 **Linux (x86_64).** Install Python 3.12 or later with your package manager. On Ubuntu 22.04, use the deadsnakes archive: `sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt install python3.12 python3.12-venv`. If the system Python cannot create virtual environments, install your distribution's `python3-venv` package. A virtual environment (`python3.12 -m venv ~/.slm-venv`) avoids conflicts with the system Python.
 
@@ -157,9 +157,9 @@ The per-tool targets, transports and the Claude Code and Codex plugins are in [I
 Package managers update the program and deliberately leave your host integrations alone.
 
 ```bash
-npm install -g superlocalmemory@latest      # npm route
-pipx upgrade superlocalmemory               # pipx route
-python -m pip install --upgrade superlocalmemory   # pip route, environment active
+npm install -g mslm-memory@latest      # npm route
+pipx upgrade mslm-memory               # pipx route
+python -m pip install --upgrade mslm-memory   # pip route, environment active
 slm restart
 slm doctor
 slm upgrade-hosts                           # preview which host integrations are stale
@@ -177,7 +177,7 @@ slm serve uninstall                  # remove the login service
 slm hooks remove                     # Claude Code hooks (add --agent codex for Codex)
 slm codex remove                     # Codex skills, agents and hooks
 slm media disable --remove-files     # delete the downloaded picture models, if you enabled them
-npm uninstall -g superlocalmemory    # or: pipx uninstall superlocalmemory / pip uninstall superlocalmemory
+npm uninstall -g mslm-memory    # or: pipx uninstall mslm-memory / pip uninstall mslm-memory
 ```
 
 Uninstalling removes code only. Your memories stay in the data folder, which also keeps the picture models (about 1.5 GB under `runtimes/media`) and the on-device answer-check model (`runtimes/laya`) until you remove them. To erase everything, export or back up what you need, then delete the data folder yourself.
@@ -186,9 +186,9 @@ Uninstalling removes code only. Your memories stay in the data folder, which als
 
 | Symptom | Fix |
 |---|---|
-| `slm: command not found` | With npm, add `$(npm prefix -g)/bin` to PATH, or run `npx superlocalmemory status`. With pip, add the Python scripts directory to PATH |
+| `slm: command not found` | With npm, add `$(npm prefix -g)/bin` to PATH, or run `npx mslm-memory status`. With pip, add the Python scripts directory to PATH |
 | Permission errors from npm | Do not use sudo. Point npm's prefix at a folder you own, or install inside a virtual environment |
-| `ModuleNotFoundError: superlocalmemory` | Activate the environment SLM was installed into, or reinstall with `python -m pip install --force-reinstall superlocalmemory` |
+| `ModuleNotFoundError: superlocalmemory` | Activate the environment SLM was installed into, or reinstall with `python -m pip install --force-reinstall mslm-memory` |
 | The installer says no supported Python | Install Python 3.12 to 3.14, or set `SLM_PYTHON` to its path |
 | Embedding model download fails | Check the connection and proxy variables, then run `slm warmup` again |
 

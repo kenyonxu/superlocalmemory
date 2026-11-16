@@ -182,7 +182,7 @@ function _deferConnections(ids, slmDir) {
     // Non-fatal — the commands below are sufficient for the user.
   }
 
-  console.log('  Run these commands after `pip install superlocalmemory` to');
+  console.log('  Run these commands after `pip install mslm-memory` to');
   console.log('  complete IDE wiring (non-destructive merge, no overwrites):');
   console.log('');
   for (const id of ids) {

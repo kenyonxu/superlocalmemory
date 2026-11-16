@@ -71,7 +71,11 @@ STATE_MISMATCH = "mismatch"
 #: The installed version could not be determined at all.
 STATE_UNKNOWN = "unknown"
 
-_DISTRIBUTION_NAME = "superlocalmemory"
+# Fork identity (4.3.0): the pip/npm distribution this repo publishes is
+# ``mslm-memory``; the Python module keeps the upstream name ``superlocalmemory``.
+# Reading the installed version by the distribution name is what lets ``slm
+# doctor`` notice an mslm-memory upgrade underneath a live process.
+_DISTRIBUTION_NAME = "mslm-memory"
 
 _RESTART_HINT = (
     "Restart this process to load the installed code "

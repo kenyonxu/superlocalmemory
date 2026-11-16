@@ -140,16 +140,16 @@ def test_detached_installer_defaults_to_published_package(
     )
 
     assert result.returncode == 0, result.stderr
-    assert _calls(call_log) == [f"{bin_dir}/uv tool install superlocalmemory"]
+    assert _calls(call_log) == [f"{bin_dir}/uv tool install mslm-memory"]
 
 
 @pytest.mark.parametrize(
     ("manager", "action", "expected"),
     [
-        ("uv", "upgrade", "uv tool upgrade superlocalmemory"),
-        ("uv", "uninstall", "uv tool uninstall superlocalmemory"),
-        ("pipx", "upgrade", "pipx upgrade superlocalmemory"),
-        ("pipx", "uninstall", "pipx uninstall superlocalmemory"),
+        ("uv", "upgrade", "uv tool upgrade mslm-memory"),
+        ("uv", "uninstall", "uv tool uninstall mslm-memory"),
+        ("pipx", "upgrade", "pipx upgrade mslm-memory"),
+        ("pipx", "uninstall", "pipx uninstall mslm-memory"),
     ],
 )
 def test_explicit_manager_lifecycle_commands(
@@ -166,7 +166,7 @@ def test_explicit_manager_lifecycle_commands(
         action,
         "--manager",
         manager,
-        *(["--package", "superlocalmemory"] if action == "upgrade" else []),
+        *(["--package", "mslm-memory"] if action == "upgrade" else []),
     )
 
     assert result.returncode == 0, result.stderr
@@ -181,7 +181,7 @@ def test_upgrade_discovers_the_manager_that_owns_installation(
     env, bin_dir, call_log = isolated_env
     _tool_shim(bin_dir, "uv")
     _tool_shim(bin_dir, "pipx")
-    env["PIPX_LIST_OUTPUT"] = "superlocalmemory 3.6.23"
+    env["PIPX_LIST_OUTPUT"] = "mslm-memory 3.6.23"
 
     result = _run(env, "upgrade")
 
@@ -197,14 +197,14 @@ def test_ambiguous_installation_requires_explicit_manager(
     env, bin_dir, call_log = isolated_env
     _tool_shim(bin_dir, "uv")
     _tool_shim(bin_dir, "pipx")
-    env["UV_LIST_OUTPUT"] = "superlocalmemory v3.6.23"
-    env["PIPX_LIST_OUTPUT"] = "superlocalmemory 3.6.23"
+    env["UV_LIST_OUTPUT"] = "mslm-memory v3.6.23"
+    env["PIPX_LIST_OUTPUT"] = "mslm-memory 3.6.23"
 
     result = _run(env, "uninstall")
 
     assert result.returncode != 0
     assert "--manager" in result.stderr
-    assert not any("uninstall superlocalmemory" in call for call in _calls(call_log))
+    assert not any("uninstall mslm-memory" in call for call in _calls(call_log))
 
 
 def test_dry_run_prints_but_does_not_execute_mutating_command(

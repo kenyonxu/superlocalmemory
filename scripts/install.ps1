@@ -22,7 +22,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PackageName = "superlocalmemory"
+# Fork identity (4.3.0): the published distribution is mslm-memory; the CLI
+# entry point stays `slm` and the Python module stays `superlocalmemory`.
+$PackageName = "mslm-memory"
 
 function Resolve-ToolManager {
     param(
@@ -78,7 +80,7 @@ function Test-ManagerOwnsPackage {
         & pipx list --short 2>$null
     }
 
-    return [bool]($listing -match '^\s*superlocalmemory(?:\s|$)')
+    return [bool]($listing -match '^\s*mslm-memory(?:\s|$)')
 }
 
 function Get-LifecycleArguments {

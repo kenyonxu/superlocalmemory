@@ -97,7 +97,7 @@ npm install -g mslm-memory
 mslm setup && mslm doctor
 ```
 
-> MSLM is also published as `superlocalmemory` — `pip install superlocalmemory` is equivalent.
+> Note: `superlocalmemory` on PyPI is the upstream project's own package; this fork is published separately as `mslm-memory`.
 
 ### First Use
 

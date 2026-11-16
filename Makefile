@@ -38,7 +38,7 @@ publish:
 	fi
 	.venv/bin/python -m build
 	TWINE_USERNAME=__token__ TWINE_PASSWORD="$$PYPI_TOKEN" \
-	    .venv/bin/twine upload dist/superlocalmemory-$(shell grep '^version' pyproject.toml | cut -d'"' -f2)*
+	    .venv/bin/twine upload dist/mslm_memory-$(shell grep '^version' pyproject.toml | cut -d'"' -f2)*
 
 # npm publish — requires NPM_TOKEN env var
 # Uses temp npmrc to avoid writing token to ~/.npmrc permanently.

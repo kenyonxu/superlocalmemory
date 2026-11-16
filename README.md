@@ -66,7 +66,7 @@ Add pictures and documents from the start with `sh get-slm.sh --media` at the en
 **npm**, the primary route (Node 18+). It installs SLM into a package-owned virtual environment:
 
 ```bash
-npm install -g superlocalmemory   # add --media to also turn on pictures and documents
+npm install -g mslm-memory   # add --media to also turn on pictures and documents
 slm setup                         # pick Mode A to keep everything on this machine
 slm connect claude-code           # or codex, cursor, windsurf, zed, claude-desktop, jetbrains, opencode ...
 ```
@@ -76,13 +76,13 @@ slm connect claude-code           # or codex, cursor, windsurf, zed, claude-desk
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate         # Windows: .venv\Scripts\activate
-python -m pip install superlocalmemory   # or, without a venv: pipx install superlocalmemory
+python -m pip install mslm-memory   # or, without a venv: pipx install mslm-memory
 slm setup
 slm connect claude-code
 slm media enable                  # optional: pictures and documents (about 1.5 GB; needs 16 GB of memory)
 ```
 
-**uv**: `uv tool install --python 3.12 superlocalmemory` installs `slm` as an isolated tool, with nothing to activate; see [Linux install](https://github.com/qualixar/superlocalmemory/blob/main/docs/install-linux.md#isolated-slm-command-with-uv).
+**uv**: `uv tool install --python 3.12 mslm-memory` installs `slm` as an isolated tool, with nothing to activate; see [Linux install](https://github.com/qualixar/superlocalmemory/blob/main/docs/install-linux.md#isolated-slm-command-with-uv).
 
 **Claude Code plugin:** `claude plugin marketplace add qualixar/superlocalmemory`, then `claude plugin install superlocalmemory@qualixar`. **Codex:** `slm connect codex`, then `slm codex install`.
 
@@ -153,7 +153,7 @@ SuperLocalMemory is part of Qualixar's AI Reliability Engineering work: agent me
 
 You do not need to wait for an app store. Every app below can take SuperLocalMemory straight from this GitHub repository, `qualixar/superlocalmemory`, in two steps.
 
-**Step 1, once per computer.** Install SuperLocalMemory: `npm install -g superlocalmemory` (or `pipx install superlocalmemory`). Your memory lives on this computer from then on.
+**Step 1, once per computer.** Install SuperLocalMemory: `npm install -g mslm-memory` (or `pipx install mslm-memory`). Your memory lives on this computer from then on.
 
 **Step 2, in each app you use:**
 
@@ -399,7 +399,7 @@ Cite with [CITATION.cff](https://github.com/qualixar/superlocalmemory/blob/main/
 ## Upgrade
 
 ```bash
-npm update -g superlocalmemory    # or: pipx upgrade superlocalmemory, uv tool upgrade superlocalmemory
+npm update -g mslm-memory    # or: pipx upgrade mslm-memory, uv tool upgrade mslm-memory
 slm restart && slm doctor
 slm upgrade-hosts                 # preview plugin and IDE updates; nothing changes until you --apply
 ```

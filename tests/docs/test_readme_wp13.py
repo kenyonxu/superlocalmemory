@@ -108,12 +108,12 @@ def test_single_quick_start():
     """AC2: exactly one install block, near the top; no duplicate Quick Start."""
     text = _readme_text()
     blocks = re.findall(r"```(?:bash|console|sh)?\n(.*?)```", text, re.DOTALL)
-    install_blocks = [b for b in blocks if "pipx install superlocalmemory" in b]
+    install_blocks = [b for b in blocks if "pipx install mslm-memory" in b]
     assert len(install_blocks) == 1, (
         f"Expected exactly 1 install block, found {len(install_blocks)} (LLD AC2)."
     )
     assert "slm setup" in install_blocks[0]
-    assert text.index("pipx install superlocalmemory") < text.index("\n## 30-second example"), (
+    assert text.index("pipx install mslm-memory") < text.index("\n## 30-second example"), (
         "The install block must come before the runnable example (LLD AC2)."
     )
     assert len(re.findall(r"^#{2,3} Quick Start", text, re.MULTILINE)) <= 1
@@ -270,9 +270,9 @@ def test_four_install_paths():
     """AC8: pipx / npm / Claude Code plugin / slm connect, plus slm wrap claude."""
     text = _readme_text()
     checks = {
-        "pipx install superlocalmemory": "pipx install superlocalmemory" in text,
-        "npm install -g superlocalmemory": (
-            "npm i -g superlocalmemory" in text or "npm install -g superlocalmemory" in text
+        "pipx install mslm-memory": "pipx install mslm-memory" in text,
+        "npm install -g mslm-memory": (
+            "npm i -g mslm-memory" in text or "npm install -g mslm-memory" in text
         ),
         "claude plugin install superlocalmemory@qualixar": (
             "claude plugin install superlocalmemory@qualixar" in text

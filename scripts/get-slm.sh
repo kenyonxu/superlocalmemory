@@ -28,7 +28,9 @@
 
 UV_INSTALL_URL="https://astral.sh/uv/install.sh"
 PYTHON_VERSION="3.12"
-PACKAGE="superlocalmemory"
+# Fork identity (4.3.0): uv installs the published distribution mslm-memory,
+# which provides the `slm` command (module name stays superlocalmemory).
+PACKAGE="mslm-memory"
 DEFAULT_PORT="8765"
 
 set -eu
