@@ -37,7 +37,12 @@ const ROOT = join(dirname(new URL(import.meta.url).pathname), '..');
 const SRC = join(ROOT, 'plugin');
 const OUT = join(ROOT, 'muse-plugin');
 const AGENT_ID = 'muse';
-const DROP = new Set(['.mcp.json', 'settings.json', '_GENERATED.md', '.claude-plugin/plugin.json']);
+// Other hosts' manifests stay out: Muse reads the Claude layout, and a root
+// mcp.json here would register SLM a second time.
+const DROP = new Set([
+  '.mcp.json', 'settings.json', '_GENERATED.md', '.claude-plugin/plugin.json',
+  'plugin.json', 'mcp.json', 'qwen-extension.json', 'kimi.plugin.json',
+]);
 
 const check = process.argv.includes('--check');
 const files = new Map(); // relative path -> { content, mode }
@@ -48,7 +53,9 @@ function walk(dir) {
     if (e.isDirectory()) walk(abs);
     else if (e.isFile()) {
       const rel = relative(SRC, abs).split('\\').join('/');
-      if (!DROP.has(rel)) files.set(rel, { content: readFileSync(abs, 'utf8'), mode: statSync(abs).mode });
+      if (DROP.has(rel)) continue;
+      const binary = /\.(png|jpe?g|gif|webp|ico)$/i.test(rel);
+      files.set(rel, { content: readFileSync(abs, binary ? undefined : 'utf8'), mode: statSync(abs).mode });
     }
   }
 }
@@ -90,6 +97,7 @@ function build() {
   }
   walk(SRC);
   for (const [rel, f] of files) {
+    if (Buffer.isBuffer(f.content)) continue;
     let content = retarget(f.content);
     if (/^skills\/[^/]+\/SKILL\.md$/.test(rel)) content = dropAllowedTools(content);
     if (rel === 'hooks/hooks.json') content = jsonSessionStart(content);
@@ -120,7 +128,10 @@ function existing() {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       const abs = join(dir, e.name);
       if (e.isDirectory()) rec(abs);
-      else have.set(relative(OUT, abs).split('\\').join('/'), readFileSync(abs, 'utf8'));
+      else {
+        const rel = relative(OUT, abs).split('\\').join('/');
+        have.set(rel, readFileSync(abs, /\.(png|jpe?g|gif|webp|ico)$/i.test(rel) ? undefined : 'utf8'));
+      }
     }
   };
   rec(OUT);
@@ -129,7 +140,8 @@ function existing() {
 
 build();
 const have = existing();
-const stale = [...files].filter(([p, f]) => have.get(p) !== f.content).map(([p]) => p);
+const same = (a, b) => (Buffer.isBuffer(b) ? Buffer.isBuffer(a) && a.equals(b) : a === b);
+const stale = [...files].filter(([p, f]) => !same(have.get(p), f.content)).map(([p]) => p);
 const extra = [...have.keys()].filter((p) => !files.has(p));
 
 if (check) {

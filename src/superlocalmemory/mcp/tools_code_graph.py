@@ -19,14 +19,13 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from mcp.types import ToolAnnotations
-
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.core.security_primitives import (
     PathTraversalError,
     safe_resolve,
 )
+from superlocalmemory.mcp.tool_hints import ADDS, DESTROYS, READ_ONLY, SETS
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +135,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 1: build_code_graph
     # ==================================================================
 
-    @server.tool()
+    @server.tool(title="Build Code Graph", annotations=SETS)
     @admits(OperationKind.CORRECT)
     async def build_code_graph(
         repo_path: str,
@@ -167,13 +166,13 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                     f"Repository path does not exist: {repo_path}"
                 )
 
-            from superlocalmemory.code_graph.config import CodeGraphConfig
-            from superlocalmemory.code_graph.service import CodeGraphService
-            from superlocalmemory.code_graph.parser import CodeParser
-            from superlocalmemory.code_graph.graph_store import GraphStore
-            from superlocalmemory.code_graph.graph_engine import GraphEngine
-            from superlocalmemory.code_graph.flows import FlowDetector
             from superlocalmemory.code_graph.communities import CommunityDetector
+            from superlocalmemory.code_graph.config import CodeGraphConfig
+            from superlocalmemory.code_graph.flows import FlowDetector
+            from superlocalmemory.code_graph.graph_engine import GraphEngine
+            from superlocalmemory.code_graph.graph_store import GraphStore
+            from superlocalmemory.code_graph.parser import CodeParser
+            from superlocalmemory.code_graph.service import CodeGraphService
 
             t0 = time.time()
 
@@ -184,7 +183,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
             }
             if languages:
                 config_kwargs["languages"] = frozenset(
-                    l.strip() for l in languages.split(",") if l.strip()
+                    lang.strip() for lang in languages.split(",") if lang.strip()
                 )
             if exclude_patterns:
                 config_kwargs["exclude_patterns"] = tuple(
@@ -280,7 +279,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 2: update_code_graph
     # ==================================================================
 
-    @server.tool()
+    @server.tool(title="Update Code Graph", annotations=SETS)
     @admits(OperationKind.CORRECT)
     async def update_code_graph(
         repo_path: str = "",
@@ -363,8 +362,8 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                 }
 
             # Re-parse changed files
-            from superlocalmemory.code_graph.parser import CodeParser
             from superlocalmemory.code_graph.graph_store import GraphStore
+            from superlocalmemory.code_graph.parser import CodeParser
 
             config = svc.config
             parser = CodeParser(config)
@@ -395,6 +394,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                         Path(fp), source, lang
                     )
                     import hashlib
+
                     from superlocalmemory.code_graph.models import FileRecord
                     from superlocalmemory.code_graph.parser import (
                         _clean_and_resolve_edges,
@@ -453,7 +453,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 3: get_blast_radius
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Blast Radius", annotations=READ_ONLY)
     async def get_blast_radius(
         changed_files: str,
         max_depth: int = 2,
@@ -481,9 +481,9 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                 return _error_response("No changed files provided.")
 
             db = _get_db()
-            from superlocalmemory.code_graph.graph_store import GraphStore
-            from superlocalmemory.code_graph.graph_engine import GraphEngine
             from superlocalmemory.code_graph.blast_radius import BlastRadius
+            from superlocalmemory.code_graph.graph_engine import GraphEngine
+            from superlocalmemory.code_graph.graph_store import GraphStore
 
             store = GraphStore(db)
             engine = GraphEngine(store)
@@ -515,7 +515,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 4: get_review_context
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Review Context", annotations=READ_ONLY)
     async def get_review_context(
         changed_files: str,
         include_source: bool = True,
@@ -572,7 +572,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
         "tests_for", "inherits_from", "inherited_by", "contains",
     })
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Query Code Graph", annotations=READ_ONLY)
     async def query_graph(
         pattern: str,
         target: str = "",
@@ -598,8 +598,8 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                 return err
 
             db = _get_db()
-            from superlocalmemory.code_graph.graph_store import GraphStore
             from superlocalmemory.code_graph.graph_engine import GraphEngine
+            from superlocalmemory.code_graph.graph_store import GraphStore
             from superlocalmemory.code_graph.models import EdgeKind
 
             store = GraphStore(db)
@@ -671,7 +671,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 6: semantic_search_code
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Search Code Semantically", annotations=READ_ONLY)
     async def semantic_search_code(
         query: str,
         kind: str = "",
@@ -721,7 +721,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 7: list_graph_stats
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Code Graph Stats", annotations=READ_ONLY)
     async def list_graph_stats() -> dict:
         """Get code graph size and health metrics."""
         try:
@@ -773,7 +773,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 8: find_large_functions
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Find Large Functions", annotations=READ_ONLY)
     async def find_large_functions(
         threshold: int = 50,
         limit: int = 20,
@@ -820,7 +820,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 9: list_flows
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="List Execution Flows", annotations=READ_ONLY)
     async def list_flows(
         sort_by: str = "criticality",
         limit: int = 20,
@@ -877,7 +877,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 10: get_flow
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Execution Flow", annotations=READ_ONLY)
     async def get_flow(
         flow_name: str,
     ) -> dict:
@@ -928,7 +928,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 11: get_affected_flows
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Affected Flows", annotations=READ_ONLY)
     async def get_affected_flows(
         changed_files: str,
     ) -> dict:
@@ -988,7 +988,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 12: list_communities
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="List Code Communities", annotations=READ_ONLY)
     async def list_communities(
         sort_by: str = "cohesion",
         limit: int = 20,
@@ -1035,7 +1035,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 13: get_community
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Code Community", annotations=READ_ONLY)
     async def get_community(
         community_id: int,
     ) -> dict:
@@ -1082,7 +1082,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 14: get_architecture_overview
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Architecture Overview", annotations=READ_ONLY)
     async def get_architecture_overview() -> dict:
         """Get high-level architecture map showing communities and their relationships."""
         try:
@@ -1131,7 +1131,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 15: detect_changes
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Detect Code Changes", annotations=READ_ONLY)
     async def detect_changes(
         base: str = "HEAD~1",
     ) -> dict:
@@ -1190,7 +1190,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 16: refactor_preview
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Preview Refactor", annotations=READ_ONLY)
     async def refactor_preview(
         action: str,
         target: str,
@@ -1221,8 +1221,8 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                     return _error_response(f"Target '{target}' not found.")
 
                 # Find all references
-                from superlocalmemory.code_graph.graph_store import GraphStore
                 from superlocalmemory.code_graph.graph_engine import GraphEngine
+                from superlocalmemory.code_graph.graph_store import GraphStore
 
                 store = GraphStore(db)
                 engine = GraphEngine(store)
@@ -1243,8 +1243,8 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                 }
 
             elif action == "find_dead_code":
-                from superlocalmemory.code_graph.graph_store import GraphStore
                 from superlocalmemory.code_graph.graph_engine import GraphEngine
+                from superlocalmemory.code_graph.graph_store import GraphStore
 
                 store = GraphStore(db)
                 engine = GraphEngine(store)
@@ -1283,7 +1283,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 17: apply_refactor
     # ==================================================================
 
-    @server.tool()
+    @server.tool(title="Apply Refactor", annotations=DESTROYS)
     @admits(OperationKind.CORRECT)
     async def apply_refactor(
         action: str,
@@ -1319,7 +1319,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 18 (BRIDGE): code_memory_search
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Search Memories Linked to Code", annotations=READ_ONLY)
     async def code_memory_search(
         code_entity: str,
         link_type: str = "",
@@ -1389,7 +1389,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 19 (BRIDGE): code_entity_history
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Code Entity History", annotations=READ_ONLY)
     async def code_entity_history(
         code_entity: str,
     ) -> dict:
@@ -1459,7 +1459,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 20 (BRIDGE): enrich_blast_radius
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Blast Radius With Memories", annotations=READ_ONLY)
     async def enrich_blast_radius(
         changed_files: str,
         max_depth: int = 2,
@@ -1484,9 +1484,9 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                 return _error_response("No changed files provided.")
 
             db = _get_db()
-            from superlocalmemory.code_graph.graph_store import GraphStore
-            from superlocalmemory.code_graph.graph_engine import GraphEngine
             from superlocalmemory.code_graph.blast_radius import BlastRadius
+            from superlocalmemory.code_graph.graph_engine import GraphEngine
+            from superlocalmemory.code_graph.graph_store import GraphStore
 
             store = GraphStore(db)
             engine = GraphEngine(store)
@@ -1533,7 +1533,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
     # Tool 21 (BRIDGE): code_stale_check
     # ==================================================================
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Check Stale Code Memories", annotations=READ_ONLY)
     async def code_stale_check(
         scope: str = "all",
     ) -> dict:
@@ -1614,7 +1614,7 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
         "mentions", "decision_about", "bug_fix", "refactor", "design_rationale",
     })
 
-    @server.tool()
+    @server.tool(title="Link Memory to Code", annotations=ADDS)
     @admits(OperationKind.CORRECT)
     async def link_memory_to_code(
         fact_id: str,
@@ -1648,9 +1648,10 @@ def register_code_graph_tools(server, get_engine: Callable) -> None:
                     f"Code entity '{code_entity}' not found in graph."
                 )
 
+            from datetime import datetime, timezone
+
             from superlocalmemory.code_graph.models import CodeMemoryLink, LinkType
             from superlocalmemory.storage.models import _new_id
-            from datetime import datetime, timezone
 
             now_str = datetime.now(timezone.utc).isoformat()
             link = CodeMemoryLink(

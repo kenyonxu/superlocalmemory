@@ -2,7 +2,7 @@
 name: slm-web-access
 description: Set up and troubleshoot SuperLocalMemory Web access, the optional link that lets web apps (ChatGPT, Claude on the web, Muse, Composio, other remote MCP clients) use the memory on this computer. Covers turning it on from the dashboard, adding and removing apps, read/save/session permissions, the second yes for bot messages and pictures (the Web access switches in Connected apps), one-time upload links for pictures and PDFs, what leaves the computer, renewal, the connection states, the errors a web app can see, and the copy-paste instructions for web agents.
 when_to_use: "web access, connected apps, connect chatgpt, connect claude web, connect muse, connect composio, connect grok bot, remote mcp, mcp.superlocalmemory.com, connector_asleep, DAILY_LIMIT_REACHED, web app cannot reach memory, instructions for web agent, web app bot messages, web app upload link, Let these apps message your other bots, Let these apps save and read pictures and documents, not_for_remote"
-allowed-tools: get_status, Read, Bash
+allowed-tools: get_status, Read, Bash(slm:*)
 ---
 
 # slm-web-access — Web apps and bots
@@ -177,3 +177,7 @@ Memory and local configuration are kept.
 - `slm-mesh` — bot messages, `mesh_wait` and `ack`
 - `slm-bot-memory` and `slm-getting-started-bot` — bots that share one computer
 - `slm-governance` — roles and company mode
+
+---
+
+*SuperLocalMemory v4.2.19 · Qualixar · AGPL-3.0-or-later*

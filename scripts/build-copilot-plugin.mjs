@@ -153,7 +153,8 @@ if (existsSync(SRC_COMMANDS)) {
 
 // 6. scripts/ — venv bootstrap + launcher (PATH-robust), from the single source.
 for (const fname of readdirSync(SRC_SCRIPTS).sort()) {
-  files.set('scripts/' + fname, readFileSync(join(SRC_SCRIPTS, fname), 'utf8'));
+  // __SLM_RELEASE__: the exact release, as build-plugin.mjs writes it.
+  files.set('scripts/' + fname, readFileSync(join(SRC_SCRIPTS, fname), 'utf8').replaceAll('__SLM_RELEASE__', VERSION));
 }
 
 // 7. README.md + _GENERATED.md

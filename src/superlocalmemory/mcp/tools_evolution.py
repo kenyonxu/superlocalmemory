@@ -18,11 +18,10 @@ import json
 import logging
 from typing import Callable
 
-from mcp.types import ToolAnnotations
-
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
+from superlocalmemory.mcp.tool_hints import READ_ONLY, hints
 from superlocalmemory.storage.read_connection import ReadConnectionFactory
 
 logger = logging.getLogger(__name__)
@@ -41,7 +40,7 @@ def _skill_profile(engine, profile_id: str) -> tuple[str, dict | None]:
 def register_evolution_tools(server, get_engine: Callable) -> None:
     """Register evolution MCP tools for skill evolution intelligence."""
 
-    @server.tool()
+    @server.tool(title="Evolve Skill", annotations=hints(destructive=True, open_world=True))
     @admits(OperationKind.EVOLVE_SKILL)
     async def evolve_skill(
         skill_name: str,
@@ -150,7 +149,7 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
             logger.debug("evolve_skill failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Skill Health", annotations=READ_ONLY)
     async def skill_health(
         skill_name: str = "",
         include_history: bool = False,
@@ -180,7 +179,7 @@ def register_evolution_tools(server, get_engine: Callable) -> None:
             logger.debug("skill_health failed: %s", exc)
             return {"skills": [], "skill_count": 0, "error": str(exc)}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Skill Lineage", annotations=READ_ONLY)
     async def skill_lineage(
         skill_name: str = "",
         profile_id: str = "",

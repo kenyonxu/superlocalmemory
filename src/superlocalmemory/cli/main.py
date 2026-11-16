@@ -15,6 +15,7 @@ from __future__ import annotations
 # GPU memory reservation on Apple Silicon. Without this, macOS Activity
 # Monitor shows 3-6 GB for what is actually a 40 MB process.
 import os as _os
+
 _os.environ.setdefault('PYTORCH_MPS_HIGH_WATERMARK_RATIO', '0.0')
 _os.environ.setdefault('PYTORCH_MPS_MEM_LIMIT', '0')
 _os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
@@ -201,11 +202,12 @@ def main() -> None:
             # we defer — the next daemon start picks it up.
             try:
                 import logging as _logging
+
+                # route through slm_home() so all 3 env aliases are honoured.
+                from superlocalmemory.cli._lazy_init import slm_home as _slm_home
                 from superlocalmemory.migrations.v3_4_25_to_v3_4_26 import (
                     migrate_if_safe as _migrate_if_safe,
                 )
-                # route through slm_home() so all 3 env aliases are honoured.
-                from superlocalmemory.cli._lazy_init import slm_home as _slm_home
                 _data = _slm_home()
                 _res = _migrate_if_safe(_data)
                 if _res.get("status") == "deferred":
@@ -406,7 +408,8 @@ def main() -> None:
     db_scale_p.add_argument(
         "scale_action",
         choices=("status", "adopt", "prepare", "verify", "promote", "rollback"),
-        help="Lifecycle action. Adopt confirms a detected legacy projection; prepare and verify never mutate active paths.",
+        help=("Lifecycle action. Adopt confirms a detected legacy projection; "
+              "prepare and verify never mutate active paths."),
     )
     db_scale_p.add_argument("--stage-id", help="Stage identifier required by verify/promote")
     db_scale_p.add_argument("--backup-id", help="Backup identifier required by rollback")
@@ -504,6 +507,10 @@ def main() -> None:
     remember_p = sub.add_parser("remember", help="Store a memory (extracts facts, builds graph)")
     remember_p.add_argument("content", help="Content to remember")
     remember_p.add_argument("--tags", default="", help="Comma-separated tags")
+    remember_p.add_argument(
+        "--speaker", default="",
+        help='Who "I" means in the text (default: you). E.g. --speaker Ava for an agent\'s words',
+    )
     remember_p.add_argument(
         "--kind", default="",
         help="What sort of memory this is: rule, decision, status, procedure, "
@@ -635,14 +642,21 @@ def main() -> None:
     )
 
     forget_p = sub.add_parser("forget", help="Delete memories matching a query (fuzzy)")
-    forget_p.add_argument("query", nargs="?", default=None, help="Query to match for deletion. Optional with --dry-run (previews all memories).")
-    forget_p.add_argument("--dry-run", action="store_true", default=False, help="Preview matches without deleting. With no query, previews every memory.")
+    forget_p.add_argument("query", nargs="?", default=None,
+                          help="Query to match for deletion. Optional with --dry-run (previews all memories).")
+    forget_p.add_argument("--dry-run", action="store_true", default=False,
+                          help="Preview matches without deleting. With no query, previews every memory.")
     forget_p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
     forget_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     delete_p = sub.add_parser("delete", help="Delete a specific memory by ID (precise)")
     delete_p.add_argument("fact_id", help="Exact fact ID to delete")
     delete_p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    delete_p.add_argument(
+        "--profile", default="", metavar="PROFILE",
+        help="Profile the memory lives in (default: the active one). "
+             "The active profile is not switched.",
+    )
     delete_p.add_argument("--json", action="store_true", help="Output structured JSON (agent-native)")
 
     update_p = sub.add_parser("update", help="Edit the content of a specific memory by ID")
@@ -725,6 +739,13 @@ def main() -> None:
         "--yes", action="store_true",
         help="Apply --refile-hidden instead of only showing what it would do",
     )
+
+    repair_speaker_p = sub.add_parser(
+        "repair-speaker",
+        help="Re-derive facts where an agent's own \"I\" was saved as the user (dry run; --yes applies)",
+    )
+    repair_speaker_p.add_argument("--yes", action="store_true", help="Apply the repair")
+    repair_speaker_p.add_argument("--json", action="store_true", help="JSON output")
 
     # v3.8.2 super-help — grouped overview of every command + focused topics.
     help_p = sub.add_parser(
@@ -1038,6 +1059,11 @@ def main() -> None:
     evidence_import.add_argument("bundle")
     evidence_import.add_argument("--profile", default="default")
     evidence_import.add_argument("--replace", action="store_true")
+    evidence_import.add_argument(
+        "--merge", action="store_true",
+        help="Add the bundle to a profile that already has memories; "
+             "existing rows are kept, never overwritten",
+    )
     evidence_import.add_argument("--rollback-dir", default=None)
     evidence_import.add_argument("--execute", action="store_true")
     evidence_import.add_argument("--json", action="store_true")
@@ -1233,6 +1259,8 @@ def main() -> None:
     register_corrections_parsers(sub)  # 4.1.22: corrections your own actions overtook
     from superlocalmemory.cli.outcome_cmd import register_outcome_parser
     register_outcome_parser(sub)  # 4.1.25: report whether recalled memories helped
+    from superlocalmemory.cli.hide_cmd import register_hide_parser
+    register_hide_parser(sub)  # 4.2.17: keep memories out of answers (--undo)
     from superlocalmemory.cli.embedder_cmd import register_embedder_parser
     register_embedder_parser(sub)
 

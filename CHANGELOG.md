@@ -5,8 +5,590 @@ All notable changes to SuperLocalMemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## mslm 4.2.6 — fork merge of upstream SuperLocalMemory 4.2.6 (2026-10-15)
-- Fork patches carried through this merge: Hermes MemoryProvider (daemon-first, profile-pinned routing), per-request profile routing (remember/recall/list_recent), provenance_kind controlled tagging, lock tolerance and ELC clock adjustments; package identity stays `mslm-memory` 4.2.6 (PyPI/npm). Earlier fork entries (mslm 4.2.0+ series) remain in git history.
+## mslm 4.2.19 — fork merge of upstream SuperLocalMemory 4.2.7–4.2.19 (2026-11-16)
+
+Security deps (mcp 2.2.0), purge/erasure fixes, large-store performance, Mode B idle fix; fork patches all retained (spec §4).
+
+## [4.2.19] — Merge an evidence bundle into a profile that has memories
+
+One new option for moving memories between machines. No data migration: the
+store stays at schema 68, so 4.2.18 and 4.2.19 can open each other's stores.
+
+### Added
+
+- `slm evidence import <bundle> --merge` adds a bundle to a profile that
+  already has memories, for example one exported on another machine. Rows the
+  profile already has are kept exactly as they are, so merging the same bundle
+  twice changes nothing. Without `--execute` it previews the exact counts and
+  writes nothing; with `--execute` it needs `--rollback-dir` and writes the
+  profile's current state there first. If an id in the bundle belongs to a
+  different profile, the merge stops before writing. Entities are not combined
+  across machines. Restart the daemon afterwards so it loads the new memories
+  and computes their embeddings (#322).
+
+### Fixed
+
+- `slm evidence export` could write a bundle that `slm evidence verify` then
+  rejected. A memory edited after it was saved (by a correction, a supersede or
+  an update) kept a record pointing at its old text, and export trusted it.
+  Export now uses that record only when it still matches, searches the source
+  otherwise, and reports the link as unresolved when the text is no longer
+  there. On a real store of 43,000 memories, 24 such memories made the export
+  invalid; it now verifies (#322).
+- `slm evidence rebuild` wrote keyword-index rows with a different tokenizer
+  from the live index, keeping common words such as "the", and wrote a row for
+  memories with no words. It now writes exactly the rows a normal save writes.
+
+## [4.2.18] — Windows service install and health checks; imports that finish
+
+Fixes reported from a Windows install in #319, batched into one release. No
+data migration: the store stays at schema 68, so 4.2.17 and 4.2.18 can open
+each other's stores. One new optional setting, `SLM_DAEMON_HEALTH_PROBE_S`.
+
+### Fixed
+
+- Windows: a ready daemon that was busy but alive was reported as unavailable,
+  because its `/health` check got 0.5 seconds. That short wait is meant only for
+  a port nobody is listening on, which Windows is slow to refuse. A ready daemon
+  whose process is alive now gets the same 2 seconds as on macOS and Linux, and
+  `SLM_DAEMON_HEALTH_PROBE_S` (0.25 to 10 seconds) sets it on any platform. On
+  Windows a short connect is tried first, so a port nobody is listening on is
+  still reported within half a second. A starting daemon still gets the short
+  check (#319).
+- Windows: `slm serve install` could not install the service. Its safety check
+  compared the file's ctime, which CPython can report differently through a path
+  and through an open handle for the same unchanged file, so every install
+  refused its own new wrapper. On Windows the check no longer uses ctime. The
+  file is still pinned by its SHA-256 and held open against writes and deletes,
+  so the check is no weaker. A failed install or uninstall now exits with code 1
+  instead of 0, and the reason is printed instead of only "Check logs" (#319).
+- A memory with no searchable words (for example a Markdown divider of 99
+  hyphens) left a keyword-index obligation that failed verification forever,
+  because the keyword index rightly skips text with no words. Such a memory no
+  longer owes a keyword-index entry, and stale keyword tokens of a memory edited
+  down to no words are removed. Obligations already stuck this way clear on
+  their next automatic retry (#319).
+- Importing a saved conversation that quotes agent-harness notices (a
+  `<task-notification>` block) stopped part-way, because the filter for prompt
+  machinery treated quoted history in a file you chose to import as machinery.
+  Folder and document imports now keep that text as untrusted source text.
+  Automatic capture still refuses it, and prompt templates are still refused
+  from every source (#319).
+- A refused save now says why. The admission journal records the reason (for
+  example `COMMAND_REJECTED:ingest_gate:prompt_template`) instead of a bare
+  code, and the folder report names it along with the part where the file
+  stopped (`at part 61/821`) (#319).
+- A file refused under the old rule could never finish, even after the rule was
+  fixed. A refusal is stored under its idempotency key, and a folder retry
+  re-sends the same keys so that parts already saved are not saved twice. A
+  refusal recorded before this release (with no reason) is now judged once more
+  when the same request arrives, so the next scan finishes the file without
+  duplicating the parts already saved (#319).
+
+- The Claude Code Stop hook saved its session summary without a session id: it
+  read only the `CLAUDE_SESSION_ID` environment variable, while Claude Code sends
+  the id in the hook payload. A session-summary lookup for the live session
+  therefore found nothing. The hook now reads the payload first and falls back
+  to the variable (#319).
+
+### Security
+
+- NLTK (pulled in by LLMLingua) is pinned to 3.10.4, which fixes nine advisories
+  against 3.10.3, including the one the dependency audit had been ignoring
+  because no fix existed. The audit now has no exceptions. SuperLocalMemory
+  never called the affected NLTK APIs.
+
+### Added
+
+- A Windows CI lane runs the Windows-specific tests on a real Windows runner on
+  every pull request (#319).
+
+## [4.2.17] — Replaced memories leave session start; one command to hide a memory
+
+The last fixes of this cycle, batched into one release. No new settings and no
+data migration: the store stays at schema 68, so 4.2.16 and 4.2.17 can open
+each other's stores.
+
+### Added
+
+- `slm hide <fact_id>...` keeps memories out of recall answers and session
+  starts without deleting or editing them; `slm hide --undo` shows them again.
+  Both are stored as your own decision, which the automatic bookkeeping rule
+  and every repair leave alone. Until now this needed hand-written SQL.
+- Jev can order the memories a session starts with. If you chose Jev as the
+  answer check and turned on its reordering (with its consent), the SessionStart
+  hook and `session_init` ask Jev once for the order of their memories, against
+  your first message or the project. Only the order is used: the answer-check
+  verdict is discarded, so a session start never says "that isn't in
+  SuperLocalMemory", and nothing is hidden. It waits at most 1.5 seconds and
+  keeps the usual order on any failure. With reordering off, a session start
+  makes no Jev request and nothing changes.
+
+### Fixed
+
+- A replaced memory no longer stays pinned at session start. When
+  `remember(replaces=...)` or a correction retired a fact, recall and pinned
+  facts already left it out, but the session-start context (`slm
+  session-context`, which the Claude Code and Codex SessionStart hooks print)
+  and the Core Memory blocks read the store with their own queries and kept
+  showing the old fact under "Core Memory (pinned, high-value)". Both now skip
+  retired facts, and a block compiled before its fact was retired is not shown.
+  Nothing is deleted: the retired fact stays in history and audit.
+- A question that names a version is no longer answered by another version.
+  "SLM 4.2.15 release" ranked "SLM 4.2.0 released" and six more other-version
+  notes first, because embeddings and the entity graph see 4.2.0 and 4.2.15 as
+  the same thing. A result that names only other versions now goes below the
+  rest, both before recall cuts to your limit and in the final order. An exact
+  match still comes first, and nothing is dropped.
+- Recall records which memories it returned again. 3.8.6 made recall
+  write-free so it never waits behind `remember`, and the record in
+  `fact_access_log` went with it; on one store the last recall row was dated
+  26 July 2026. Retention's access clock and the "active decisions" Core Memory
+  block read that table, so every recall since then counted as unread: a memory
+  you kept recalling still aged as unused, and no new decision reached the
+  block. The record is now queued on SLM's background writer, so recall itself
+  stays write-free. SLM's own warm-up recalls are not counted.
+- `PromptInjector.inject_into_context` ignored its documented `total_budget`
+  override; it is now split between soft prompts and memories in the configured
+  ratio.
+- Cloud backup sync reports the size it uploaded (`size_mb`).
+
+### Changed
+
+- The code base is lint-clean (`ruff check src tests` reports nothing), and CI
+  now runs a pinned ruff on every change. Line length is 120.
+
+## [4.2.16] — Session starts without bookkeeping
+
+A small follow-up to 4.2.15. No new settings. One automatic data repair runs
+on first start (M068, no command): it only marks machine-written session lines
+so they stop being returned as answers. Nothing is deleted or edited.
+
+Upgrade every copy of SuperLocalMemory on a machine together: once 4.2.16 has
+opened a store, an older copy refuses to open it and its error lists every copy
+it finds. To go back to 4.2.15, run `slm db prepare-downgrade` first.
+
+### Fixed
+
+- **Session-end lines with only git details no longer count as memories.** The
+  end-of-session summary that names just the branch and the uncommitted-file
+  total ("session ended ... | branch: main | uncommitted: 2 files changed, 0
+  insertions(+), 0 deletions(-)") was treated as real content, so these lines
+  were returned by recall and shown at session start. They are now bookkeeping
+  like the plain "session ended" line, as are the copies made from them ("the
+  user's session ended ...", "The session ended on <date>", "<date> is the date
+  when the session ended", a bare "2 files changed, ..." line). A summary that
+  lists recent commits still counts: that is what "what did I ship last
+  session?" needs.
+- **Bookkeeping saved before the rule learned its shape is now flagged too.**
+  A one-time migration (M068, no command needed) checks the rows already in
+  the store against every shape the rule knows, including the agent checkpoint
+  and "the session ended" forms added in 4.2.14 and 4.2.15. On one real store
+  it flagged 2,030 rows, every one a bare session-end time or git total.
+  Nothing is deleted or edited: flagged rows stay in lists and on the
+  dashboard and only leave recall answers, and a row you marked yourself is
+  never touched.
+
+## [4.2.15] — Clean session starts, patched dependencies
+
+A small follow-up to 4.2.14. No migration, no new settings, nothing to
+re-index. The next daily refresh retires stale auto-learned prompts on its own.
+
+### Security
+
+- Raised the floors for four packages SuperLocalMemory pulls in indirectly,
+  so clean installs and upgrades both get the patched releases: `filelock`
+  4.2.1 or later (via huggingface_hub, torch, transformers), `dnspython` 2.9.0
+  or later (via email-validator), `opentelemetry-api` 1.45.1 or later (via
+  mcp) and `setuptools` 84.1.0 or later (via torch). SuperLocalMemory does not
+  import any of them directly.
+
+### Fixed
+
+- **Old auto-learned prompts were never retired, so sessions kept starting
+  with them.** Every daily refresh of the auto-learned "soft prompts" stopped
+  with a database error before its clean-up step: it tried to store a category
+  the table does not accept. Nothing reported it, so a prompt like "The user's
+  preferred technology stack includes: file, session, ended, ..." stayed
+  active for months and every session started with it. The refresh now only
+  produces categories the store accepts, the clean-up always runs, and old
+  prompts are retired on the next refresh.
+- **Session start no longer includes tool-usage statistics** ("frequently uses
+  Read (6816 times)"). They are still recorded and shown on the dashboard.
+- A copied session marker in the form "the session ended <date> <time>" is now
+  recognised as bookkeeping, like the other marker forms.
+
+## [4.2.14] — No more hangs on unusual text, repairable old saves, Mode B cost control
+
+Fixes for #310, #308 and #309, and two problems found while working on them.
+Every new setting defaults to what 4.2.13 did, so nothing changes until you
+choose. No migration. Nothing needs re-indexing: the stored output of every
+fixed text matcher is identical.
+
+### Fixed
+
+- **A save or a recall question could hang on one unusual word** (#310). The
+  matcher that finds lower-case technical names ("llama3.2", "snake_case")
+  backtracked exponentially on a word with a long run of digits followed by
+  `-`, `/` or `_`: `img2026100418461234567890-edit` took minutes, and every
+  retry of that save hung again. It now runs in milliseconds and returns
+  exactly the same names. That was checked on all 48 million strings up to
+  length 8 over its alphabet and on every text of a 57,000-text store.
+- **Two more slow matchers, found by auditing every pattern after #310.** The
+  date-range readers ("from X to Y", "between X and Y") took 29 seconds on a
+  save whose text had a long run of spaces, as text copied from a PDF often
+  does. They now finish in milliseconds and return the same dates. That was
+  checked on 23.5 million strings and on every text of the same real store.
+  The trade: a memory over 5,000 characters spends up to about 70 ms more
+  reading its dates; shorter text is unaffected.
+- **`slm ops repair-saves` repairs the saves the one-time store repair
+  missed** (#308). Saves from 4.1.1x builds whose text was blanked with
+  `[REDACTED:…]` markers stayed failed forever when they failed after the
+  4.1.19 store repair had already run. `repair-saves` now restores them from
+  the save itself and re-files them. It uses the same guarded writes the store
+  repair used, with a dry run first and a backup before `--apply`. An original
+  that looks like it holds a secret, or that the ingest gate rejects, is
+  listed for you to review and never restored automatically. The review reason
+  "its text was changed after saving" was wrong (no SLM path rewrites a
+  memory's text after a save) and now says what is known and what to do.
+- **Session start showed sentence fragments as rules, and dropped recall
+  results.** Since 4.2.5 every sentence of a memory is also stored as its own
+  fact, and each carried the memory's "rule" label, so one seven-sentence rule
+  took seven of the ten rule slots, fragments included. Each rule is now one
+  entry. When there are more than ten, rules saved in this project come first,
+  then the ones this session's recall found relevant, then the newest. Recall
+  results always keep their places in `memories`.
+- **Session start no longer injects your own prompts and the hooks' markers
+  as "Core Memory".** The pinned Core Memory blocks that every Claude Code and
+  Codex session starts with were compiled from the most-read, newest and most
+  confident facts of any origin. On a real store, 14 of the 15 facts behind
+  them were fragments of prompts the auto-capture hook stored ("You need to
+  give me a google flow avatar prompt.") or the hooks' own "session ended" and
+  "File changed" markers. The blocks are now built only from memories, and
+  the behaviour-telemetry block ("time_of_day: hour_21") is no longer
+  injected. Captured prompts stay stored and searchable. A block compiled
+  before upgrading is held back until its daily recompile.
+- **`slm config set` could erase your settings.** On an unreadable
+  `config.json` it started from an empty file and wrote that back. It now
+  stops and changes nothing, and every write is locked and atomic.
+- **A dashboard setting could undo a `slm config set` change.** The daemon
+  saved the whole configuration as it was when it started, so changing, say,
+  recall depth in the dashboard put back any value the CLI had changed since.
+  The dashboard now writes only the setting you changed.
+- **The one-time store repair could put a blanked secret back.** On a store
+  upgraded from a 4.1.1x build, the repair that runs once at start-up restored
+  every `[REDACTED:…]` span from the original save, including one that held a
+  real credential. A save whose original looks like it holds a secret is now
+  left as it is, in that repair and in `repair-saves`.
+- **Profile erase left overtaken correction cases behind**, and restoring a
+  snapshot could reopen correction cases you had closed or bring back ones you
+  had dismissed. All three are fixed.
+
+### Added
+
+- **Two Mode B/C cost settings** (#309). Each stored fact costs one model call
+  for its context sentence and up to five for contradiction checks.
+  `slm config set temporal_validator.max_llm_checks 0` keeps only the
+  embedding-based check, and `slm config set encoding.context_generation_llm
+  false` writes context sentences by rule. Run `slm restart` to apply. Each
+  mode keeps its own value. The defaults (5 and true) are 4.2.13's.
+- **`slm corrections dismiss`** (#309) closes the correction proposals SLM
+  made by itself and nobody reviewed. Filter with `--reason`, `--older-than`
+  and `--before`. It shows what it would do first; `--apply` takes a backup.
+  Each case can be put back with `slm corrections restore-overtaken`. There is
+  deliberately no bulk reject: a rejected case counts as decided, and a decided
+  case keeps its facts from ever being deleted.
+
+## [4.2.13] — Lighter ingestion on large stores, fresh graph scores
+
+Three fixes for large stores, from reports on #306 and #304. No migration and
+no command to run.
+
+### Fixed
+
+- **Alias keys find their entities** (#306). Facts store entity IDs, and the
+  key expander looked each one up as a name, so every lookup missed and no
+  alias reached the keyword index. The name lookup also skipped its index and
+  scanned every entity: about 3 seconds for 45 lookups on a store with 38,000
+  entities. IDs now resolve directly and names use the index.
+- **The graph copy gets a fact's edges in one write** (#306). Projecting a
+  fact wrote each of its edges in its own database transaction, 40 on average
+  and up to 203, which kept the disk busy during ingestion. It is now one write
+  per fact.
+- **Graph scores are recomputed on large stores** (#304). The memory watchdog
+  stopped the graph-metrics helper at 2.5 GB, which a graph of 3.6 million
+  edges passes, so PageRank and communities were never refreshed. The helper
+  now gets a limit sized to the graph, within the daemon's memory budget.
+
+## [4.2.12] — Large stores answer, purges finish, the mode says where data goes
+
+Fixes for six reports filed after 4.2.11. No migration and no command to run.
+
+### Fixed
+
+- **A slow recall answers instead of saying busy** (#304). On a store of 37,000
+  memories every explicit recall ran past its time limit and came back as HTTP
+  503 "ask again in 2 seconds", on an idle daemon, and every retry did the same.
+  A recall that runs out of time now answers with keyword matches, labelled
+  `degraded_lexical` and unchecked. "Busy" is kept for when every slot really is
+  taken, the one case where asking again helps.
+- **Recall does a third of the vector work** (#304). Three search channels ran
+  the same nearest-neighbour search at the same moment on every recall. They
+  now share one, and the channel phase stops waiting before the caller gives up.
+- **A purge finishes after fast note changes** (#297). Editing or deleting a
+  note while its save was still being enriched made that save fail three times
+  with "queryable fact profile mismatch or missing fact", and
+  `sources remove --purge` refused until the retries ran out. Such a save now
+  settles at once and puts nothing back.
+- **A custom embedding endpoint keeps the model you chose** (#302). In Modes A
+  and B a blank model name was filled with the local model's id and width, which
+  an endpoint like Ollama's does not serve, so every embedding call failed.
+  Saving such an endpoint without a model name or width is now refused with a
+  message saying what to fill in.
+- **Modes A and B say when data leaves this computer** (#303). A remote
+  embedding endpoint, or a hosted language model in Mode B, was accepted while
+  the mode still reported local-only. The dashboard card, the mode status, the
+  configuration warnings and the EU AI Act check now follow the configuration.
+- **Every MCP tool has a title and all four behaviour hints** (#300), as the
+  Claude and ChatGPT directories require. `slm_cache_set` no longer claims to be
+  read-only.
+- **The web sign-in tells identical connections apart** (#301). After
+  reinstalls the connection picker listed several identical entries. Each now
+  shows a short ID and its expiry, and an opt-in box removes the older ones for
+  that profile and app. Patch by @DannyGi82.
+
+## [4.2.11] — Removed notes stay removed, the graph copy stays in step, edits are recalled
+
+Three fixes for things that looked done but were not. Upgrading runs one
+migration (M067, one trigger) and needs no command; a graph copy that already
+drifted is rebuilt by the daemon on its own within about ten minutes.
+
+### Fixed
+
+- **Revising, deleting or purging an Obsidian or folder source removes every
+  fact it made** (#297). A save is enriched after it returns, and the source
+  only knew the first fact, so the later ones stayed in recall. Removal now
+  reads the memory's facts again, and an unfinished save counts as pending:
+  `remove` and `--purge` refuse instead of reporting success.
+- **`--purge` finishes on a store with backups** (#297). A snapshot in
+  `backups/` or `pre-migration-snapshots/` cannot be rewritten, so purge kept
+  asking you to try again. It now completes, writes the erasure receipt, and
+  names the snapshot folders still holding a copy.
+- **`injection.enabled false` turns off automatic memory** (#297). The switch
+  was saved but read by nothing. It now stops per-prompt hooks, `before_web`,
+  the SessionStart context, `session_init` and prestaging. Explicit recall and
+  search still work. `slm config set` accepts `injection.enabled` and
+  `auto_invoke.enabled`.
+- **Graph removal no longer scans every edge** (#296). Removing a fact from
+  the Cozo copy took 428 ms at 800k edges; it now takes about 0.1 ms.
+- **The Cozo graph copy stays in step with the store** (#296). Edges to
+  archived or quarantined facts were put back on every edit, and archive,
+  merge and quarantine never reached the copy. Both are fixed, the daemon
+  checks the copy each maintenance cycle and rebuilds a drifted profile, and
+  `slm db regraph` works while the daemon runs.
+- **`slm db scale promote` and `rollback` refuse while the daemon runs.**
+- **The daemon keeps answering while a session closes.** Every agent session
+  end asked the daemon to summarise the session, and it did so on the thread
+  that answers requests, reading every memory in the store and every past
+  summary. On a store of 30,000 memories the daemon stopped answering for
+  seconds to minutes, many times an hour. Closing now reads only that
+  session's memories, off the request thread, and an older session is no
+  longer skipped on a store larger than 50,000 memories.
+- **A remote MCP call no longer stalls the daemon after a restart.** The MCP
+  endpoint inside the daemon built a second memory engine on its first call,
+  re-checking every migration on the thread that answers requests. It now uses
+  the daemon's own engine.
+- **The graph check no longer holds up saves.** It counted the store's
+  connections on the connection used for writing; it now reads on its own.
+- **Recall returns an applied correction.** 4.2.10 indexed edited memories,
+  but recall's source check compared the new text with the text it replaced
+  and withheld every edit. An applied correction now counts as your own
+  decision; the retired original stays hidden.
+
+### Security
+
+- certifi 2026.10.19 (GHSA-6q48-6c7w-9gw2).
+
+## [4.2.10] — An edited memory can be found again
+
+If you edited a memory (the dashboard's Edit button, the `update_memory` tool
+or `slm update`) and applied the correction, a question could no longer find
+it. The old text was retired and the new text was saved, but the new text was
+never added to the search index, so only exact word matches reached it until
+the daemon restarted. Nothing to run after upgrading: the restart that comes
+with the upgrade indexes every edit made so far.
+
+### Fixed
+
+- **Applied corrections are indexed right away.** Applying a correction now
+  adds the corrected memory to the vector index, the ANN index and BM25, the
+  same way `remember` does. A proposal that is still waiting for review stays
+  out of search, as before. Saving with `remember`, including `replaces=`, was
+  never affected.
+
+## [4.2.9] — Mode B stops keeping your local model busy for nothing
+
+If you run Mode B with Ollama, every saved memory used to cost up to eleven
+model calls, most of them wasted. A machine with a steady stream of memories
+kept Ollama busy all day, and recalls waited behind it. Nothing to run after
+upgrading.
+
+### Fixed
+
+- **Linked memories no longer trigger model calls that were never saved.**
+  Each new memory links to up to ten similar older ones, and Mode B asked the
+  model to rewrite every one of them. The request never included the new
+  memory, and saving the answer always failed without a visible error, so none
+  of that work was ever kept (since 3.2.2). Linked memories now get the new
+  memory's keyword added, as in Mode A, with no model call.
+- **Thinking models answer directly.** SLM never told Ollama to skip a model's
+  thinking step, so models that think by default (Gemma 4, Qwen 3) reasoned
+  for ~400 tokens before every short answer: about 5 s instead of under 1 s on
+  `gemma4:e2b`, and an empty answer when the reply had a length limit. Thinking
+  is now off for every SLM request. Set `SLM_OLLAMA_ALLOW_THINK=1` to give the
+  model its default back.
+- **Memory descriptions from Gemma 4 are kept.** Gemma 4 wraps its answer in a
+  code fence, which SLM could not read, so the description fell back to a
+  template every time. Fenced answers are now read.
+- **`slm provider set ollama --mode b --model <name>` does what it says.**
+  Named providers were always saved as Mode C with the preset model: `--mode`
+  and `--model` were read only for `custom`. A local provider now defaults to
+  Mode B, `--mode` and `--model` are honoured, and an unknown mode is refused.
+- **A model or embedder you change stays changed when you switch modes.**
+  SLM keeps one settings file per mode. Running `slm mode b` while already in
+  Mode B, or switching modes from the dashboard, skipped saving the mode you
+  were in, so the next switch could bring back the old model or embedder. The
+  mode you leave is now always saved first, from the CLI and the dashboard.
+- **Setup recommends the model that tested best.** An installed `gemma4:e2b`
+  was put first in the model list and offered as a 7.2 GB download, although
+  SLM has not tested it. The list now puts models that kept facts intact in
+  SLM's extraction test first, then untested ones, then models the test caught
+  inventing details (such as `llama3.2`).
+
+Measured on one Mac with `gemma4:e2b`: a memory's description took 11.7 s and
+was discarded; it now takes 2.2 s and is kept. The calls for three linked
+memories took 28.7 s; they now take none.
+
+## [4.2.8] — No more lock errors, nothing dropped silently, and your own forgetting settings decide what archives
+
+Upgrading runs a few one-time repairs automatically the first time the daemon
+starts. Nothing to run. Every repair keeps an undo record, and `slm doctor`
+shows what each one did.
+
+### Automatic on first start
+
+- **Mesh gets its own database file.** Agent-to-agent messages, heartbeats and
+  locks move from `memory.db` to `mesh.db`, so mesh traffic can no longer make a
+  memory write wait or fail with "database is locked". Mesh settings (peer
+  names, mutes, web-app connections, shared state) are kept for good; activity
+  older than `mesh.retention_days` (default 7) is cleared, because mesh is live
+  coordination, not memory. `mesh.db` is included in backups.
+- **Made-up dates are removed.** Before 4.1.6 the extraction step sometimes
+  wrote a placeholder date (14 or 15 January 2024, or 15 January 2026) into a fact when it did not
+  know the real one. Those dates are removed from the fact and its date record;
+  the fact itself stays. A date that also appears in the text the fact came
+  from is left alone.
+- **Memories archived against your own settings come back.** One maintenance
+  pass decided archiving with built-in defaults instead of your `forgetting`
+  settings, and an older clock bug archived some memories a day after they were
+  saved. Those memories are restored to the zone your settings give them. Never
+  restored: anything you deleted, forgot or erased.
+- **Leftover search-index rows** from a delete that stopped partway are removed.
+
+### Memory
+
+- **Every part of SLM that can archive a memory now follows your settings.**
+  How often a memory is recalled is not, on its own, a reason to archive it. A
+  test keeps the archive decisions in agreement.
+- **The overnight forgetting pass used the wrong clock** when Ebbinghaus–Langevin
+  coupling was turned on, and could archive months-old memories that should have
+  stayed warm. Thanks to @kenyonxu (#266).
+- **Test strings, placeholder dates and empty facts can no longer be scored as
+  "worth keeping".** They stay searchable; they just don't outrank your notes.
+- `slm delete --profile <name>` deletes a memory in another profile, and the
+  doctor's hidden-memory list names the profile of each row.
+
+### Nothing dropped silently
+
+- **Hook events went missing under load.** The tool-result hook gave the
+  database 50 ms and quietly dropped the event when it was busy. Hooks now hand
+  events to the daemon, which writes them through its single writer; if the
+  daemon is not running, events wait in a small local queue and are written
+  later, once. `slm doctor` has a "Hook events" row.
+- Learning-store writes that gave up after under a second now wait like every
+  other writer.
+
+### Connect more agents
+
+- `slm connect qwen-code`, `kimi-code`, `kimi-cli` and `kiro`.
+- The plugin now ships native manifests for Qwen Code and Kimi Code, and an
+  Agent Plugins manifest, so it installs as a Kiro power.
+- New guide: [OpenCode setup](docs/opencode.md).
+- **Codex printed "Ignoring malformed agent role definition" on every run.** SLM's
+  Codex agent files used the key `instructions`; Codex reads
+  `developer_instructions`. The next `slm upgrade-hosts` rewrites the files SLM
+  wrote; files you edited yourself are left alone.
+- **MCP registry clients start SLM with `uvx` first.** Apps that install
+  servers from the official MCP registry (VS Code, Copilot, Zed) used to run a
+  first-time `npx` install that took longer than they wait. `uvx
+  superlocalmemory mcp` now works.
+
+### Security
+
+- `mcp` 2.0.0 → 2.2.0 for GHSA-84m7-p3x7-pcfv (medium): stateful
+  Streamable-HTTP sessions could pile up. SLM serves stateless by default, so
+  only `SLM_MCP_STATEFUL` users were exposed.
+- The Claude plugin's launcher no longer exports a variable whose name looked
+  like a credential to Anthropic's plugin directory.
+
+### Releases
+
+- A release now publishes itself everywhere: PyPI, npm (trusted publishing),
+  the GitHub release, the MCP registry, Open VSX, the Claude plugin repository,
+  the DeepSeek Harness bundle and ClawHub, and opens a checklist for the
+  listings that need a person. See `docs/release-distribution.md`.
+
+## [4.2.7] — An agent's "I" stays the agent's, and a damaged keyword index no longer stops an upgrade
+
+No migration. Nothing is moved or deleted.
+
+### Memory
+
+- **An agent's own first person was saved as the user's (#265).** Every save
+  through the tool interface was extracted as if the user had said it, so an
+  agent writing "I prefer short answers" produced the fact "the user prefers
+  short answers". A save from an agent now speaks as that agent. The stored
+  text never changed; only the derived facts were wrong.
+  - `remember`, `slm remember --speaker` and `POST /remember` take an optional
+    `speaker`: a name, or `user` when an agent saves the user's own words.
+  - `slm repair-speaker` lists memories whose facts were affected (dry run) and,
+    with `--yes`, re-derives them. Each repair can be undone with
+    `slm review-correction`.
+  - Saves from the command line, hooks and the dashboard are unchanged.
+
+### Upgrades
+
+- **A damaged keyword index stopped the daemon from starting (#204).** The
+  safety copy taken before a migration reproduced the damage, failed its
+  integrity check, and the upgrade stopped there. When the keyword index is the
+  only damage, the copy is now taken with that index rebuilt from the stored
+  facts, and the log says to run `slm db repair --apply` for the store itself.
+  Any other damage still stops the migration.
+
+### Everything else
+
+- A one-time GitHub star request after `slm setup` and your first successful
+  recall in a terminal, a link in `slm help` and the dashboard, and a one-time
+  note in the VS Code extension. Never in tool output, hooks or `--json`.
+- Mesh: under heavy load a heartbeat or registration could lose the race for
+  the database and return an error. Mesh writes now retry longer, and a busy
+  moment answers "retry shortly" (503) instead of an error trace. No message
+  was ever affected.
+- The daemon raises its open-file limit at start (macOS gives a launchd
+  service only 256). Under load the vector store ran out and a new memory's
+  vector copy waited for a restart; it was always findable by keyword.
+- Tool counts in the docs: `full` is 58 tools, 5 more while images are on.
+- `docs/RELEASE-CHECKLIST.md` lists every registry a release goes to.
 
 ## [4.2.6] — The Hermes plugin works on a default install, and every host package meets its directory's rules
 
@@ -3107,7 +3689,7 @@ Eight community pull requests merged after line-by-line review, plus fixes for t
 
 ## [3.6.14] - 2026-06-18 — Audit-hardened: memory bounds, cross-tenant cache isolation, atomic credentials
 
-Shipped through two adversarial audit passes (Qualixar Iron Pattern Stages 8–9), validated against a green 5933-test suite under the real 3.12 runtime. Default single-machine behavior is unchanged.
+Default single-machine behavior is unchanged.
 
 ### Security
 

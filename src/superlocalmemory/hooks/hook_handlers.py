@@ -139,11 +139,20 @@ PER_PROMPT_ACTIONS = frozenset({
 })
 
 
-def _per_prompt_recall_off() -> bool:
+#: Every hook that adds recalled memories to the agent's context, by its rules trigger. All of
+#: them honour ``injection.enabled`` and ``auto_recall.enabled``; the session-start context goes
+#: through ``slm session-context``, which checks the ``session_start`` trigger itself.
+INJECTING_ACTIONS = {
+    **{action: "every_prompt" for action in PER_PROMPT_ACTIONS},
+    "before_web": "before_web",
+}
+
+
+def _recall_switched_off(trigger: str) -> bool:
     try:
         from superlocalmemory.hooks import rules_engine
 
-        return not rules_engine.load().per_prompt_recall_on()
+        return not rules_engine.load().should_recall(trigger)
     except Exception:  # fail open: the hook runs as it always has
         return False
 
@@ -153,7 +162,8 @@ def handle_hook(action: str) -> None:
     # Grok CLI sends camelCase keys; every handler below reads snake_case.
     from superlocalmemory.hooks.payload_keys import normalize_stdin
     normalize_stdin()
-    if action in PER_PROMPT_ACTIONS and _per_prompt_recall_off():
+    trigger = INJECTING_ACTIONS.get(action)
+    if trigger and _recall_switched_off(trigger):
         sys.stdout.write("{}")
         sys.exit(0)
     # v3.4.22 (LLD-01 §4.7): Active-Brain hot-path handlers are routed here
@@ -499,6 +509,28 @@ def _hook_checkpoint() -> None:
 # 5. STOP — Stop hook (session end)
 # ---------------------------------------------------------------------------
 
+def _payload_session_id() -> str:
+    """``session_id`` from the hook's stdin payload, or ``""``.
+
+    Read only when ``handle_hook`` has already buffered stdin
+    (``normalize_stdin`` leaves a ``StringIO``), so this can never block on
+    an open pipe inside the Stop hook's 10-second limit.
+    """
+    import io
+
+    stream = sys.stdin
+    if not isinstance(stream, io.StringIO):
+        return ""
+    try:
+        data = json.loads(stream.getvalue() or "{}")
+    except ValueError:
+        return ""
+    value = data.get("session_id") if isinstance(data, dict) else None
+    if isinstance(value, str) and 0 < len(value.strip()) <= 200:
+        return value.strip()
+    return ""
+
+
 def _hook_stop(deadline: "HookDeadline | None" = None) -> None:
     """Save rich session summary + trigger auto-consolidation.
 
@@ -576,7 +608,9 @@ def _hook_stop(deadline: "HookDeadline | None" = None) -> None:
         parts.append(f"files: {modified}")
 
     summary = " | ".join(parts)
-    session_id = os.environ.get("CLAUDE_SESSION_ID", "")
+    # Issue #319: Claude Code sends the session id in the hook payload; the
+    # environment variable is only a fallback for hosts that set it.
+    session_id = _payload_session_id() or os.environ.get("CLAUDE_SESSION_ID", "")
 
     # --- Save to SLM (v3.4.13: daemon HTTP, not subprocess) ---
     # 4.1.25: only while auto_capture.capture_session_summary is on.

@@ -14,11 +14,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from mcp.types import ToolAnnotations
-
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.mcp.shared import authorize_mcp_mutation
+from superlocalmemory.mcp.tool_hints import READ_ONLY, SETS
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 0. get_version (so IDEs can check compatibility)
     # ------------------------------------------------------------------
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Version", annotations=READ_ONLY)
     async def get_version() -> dict:
         """Get SuperLocalMemory version, Python version, and platform info."""
         try:
@@ -50,7 +49,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 1. set_mode
     # ------------------------------------------------------------------
-    @server.tool()
+    @server.tool(title="Set Operating Mode", annotations=SETS)
     @admits(OperationKind.MODE_CHANGE)
     async def set_mode(mode: str) -> dict:
         """Switch operating mode (a, b, or c).
@@ -114,7 +113,8 @@ def register_v3_tools(server, get_engine: Callable) -> None:
             return {
                 "success": True,
                 "mode": mode_lower,
-                "description": _mode_description(mode_lower, config.retrieval),
+                "description": _mode_description(
+                    mode_lower, config.retrieval, _config_locality(config)),
                 "online_answer_check": online_check_on(config.retrieval),
                 "needs_reindex": needs_reindex,
                 "message": (pending_switch_message(old_config.embedding, config.embedding)
@@ -127,7 +127,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 2. get_mode
     # ------------------------------------------------------------------
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Operating Mode", annotations=READ_ONLY)
     async def get_mode() -> dict:
         """Get current operating mode and its capabilities.
 
@@ -149,7 +149,8 @@ def register_v3_tools(server, get_engine: Callable) -> None:
             return {
                 "success": True,
                 "mode": m,
-                "description": _mode_description(m, retrieval),
+                "description": _mode_description(
+                    m, retrieval, _config_locality(engine._config)),
                 "online_answer_check": online_check_on(retrieval),
                 "capabilities": caps,
             }
@@ -160,7 +161,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 3. health
     # ------------------------------------------------------------------
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Check System Health", annotations=READ_ONLY)
     async def health(profile_id: str = "") -> dict:
         """Get system health including math layer status.
 
@@ -255,7 +256,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 4. consistency_check
     # ------------------------------------------------------------------
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Check Memory Consistency", annotations=READ_ONLY)
     async def consistency_check(limit: int = 100) -> dict:
         """Run sheaf consistency check on stored memories.
 
@@ -312,7 +313,7 @@ def register_v3_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 5. recall_trace
     # ------------------------------------------------------------------
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Trace Recall Scores", annotations=READ_ONLY)
     async def recall_trace(
         query: str,
         limit: int = 10,
@@ -460,20 +461,37 @@ def _current_retrieval(engine: Any) -> Any:
         return getattr(getattr(engine, "_config", None), "retrieval", None)
 
 
-def _mode_description(mode: str, retrieval: Any = None) -> str:
+def _mode_description(mode: str, retrieval: Any = None, locality: Any = None) -> str:
     """Human-readable capability description for a mode (never a legal claim).
 
     While the online answer check is on, "nothing leaves this device" is not
-    true in any mode, so the description says what does leave instead.
+    true in any mode, so the description says what does leave instead. The same
+    goes for a local mode whose embedding endpoint or model is not on this
+    computer (#303): ``locality`` is the effective one from
+    ``core.data_locality`` and replaces the claim with what it found.
     """
     from superlocalmemory.core.egress_notice import online_check_notice
 
     notice = online_check_notice(retrieval) if retrieval is not None else ""
     text = _base_mode_description(mode)
+    if locality is not None and not locality.stays_local and locality.remote_parts:
+        from superlocalmemory.core.data_locality import remote_parts_sentence
+
+        text = text.replace("nothing leaves this device", "not everything stays on this device")
+        text = f"{text} {remote_parts_sentence(locality)}"
     if notice and mode in ("a", "b"):
         text = text.replace("nothing leaves this device", "nothing else leaves this device")
         return f"{text} {notice}"
     return f"{text} {notice}" if notice else text
+
+
+def _config_locality(config: Any) -> Any:
+    """The effective data locality of a loaded config (``core.data_locality``)."""
+    from superlocalmemory.core.data_locality import effective_data_locality
+
+    return effective_data_locality(
+        config.mode, getattr(config, "embedding", None), getattr(config, "llm", None),
+    )
 
 
 def _base_mode_description(mode: str) -> str:

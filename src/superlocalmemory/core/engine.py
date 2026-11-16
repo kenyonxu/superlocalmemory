@@ -24,19 +24,22 @@ import time
 from pathlib import Path
 from typing import Any
 
-from superlocalmemory.core.session_identity import synthetic_session_id
 from superlocalmemory.core.config import (
     CANONICAL_LIST_LIMIT, CANONICAL_RECALL_LIMIT, SLMConfig,
 )
 from superlocalmemory.core.engine_capabilities import Capabilities, CapabilityError
 from superlocalmemory.core.modes import get_capabilities
+from superlocalmemory.core.session_identity import synthetic_session_id
 from superlocalmemory.storage.models import (
-    AtomicFact, MemoryRecord, Mode, RecallResponse,
+    AtomicFact,
+    MemoryRecord,
+    Mode,
+    RecallResponse,
 )
 
 logger = logging.getLogger(__name__)
 
-from superlocalmemory.core.hooks import HookRegistry
+from superlocalmemory.core.hooks import HookRegistry  # noqa: E402 - late import, order kept
 
 
 def _verify_ingestion_schema(memory_db: Path) -> bool:
@@ -263,20 +266,15 @@ class MemoryEngine:
         self._db = DatabaseManager(self._config.db_path)
         self._db.initialize(schema)
 
-        # V3.4.3: Apply "Unified Brain" schema extensions (mesh, entity compilation, ingestion)
+        # V3.4.3: Apply "Unified Brain" schema extensions (entity compilation, ingestion)
         # Idempotent — safe to call on every init. Skips if already applied.
+        # The mesh tables (and their v3.4.6 additions) are not created here:
+        # from 4.2.8 they live in mesh.db, built by mesh/mesh_store.py.
         try:
             from superlocalmemory.storage.schema_v343 import apply_v343_schema
-            apply_v343_schema(str(self._db.db_path))
+            apply_v343_schema(str(self._db.db_path), include_mesh=False)
         except Exception as exc:
             logger.warning("V3.4.3 schema migration failed: %s", exc)
-
-        # V3.4.6: Apply "Connected Brain" mesh enhancements (broadcast, project routing, offline queue)
-        try:
-            from superlocalmemory.storage.schema_v343 import apply_v346_schema
-            apply_v346_schema(str(self._db.db_path))
-        except Exception as exc:
-            logger.warning("V3.4.6 schema migration failed: %s", exc)
 
         # V3.4.7: Apply "Learning Brain" schema before deferred migrations.
         # M029 adds composite history indexes to these runtime tables, so the
@@ -298,7 +296,8 @@ class MemoryEngine:
         # make every advertised write path fail after startup.
         try:
             from superlocalmemory.storage.migration_runner import (
-                apply_all, apply_deferred,
+                apply_all,
+                apply_deferred,
             )
             _base = self._config.base_dir
             _learning_db = _base / "learning.db"
@@ -372,16 +371,19 @@ class MemoryEngine:
             logger.debug("McpEmbedderProxy init skipped: %s", exc)
 
     def _init_heavy_layer(self) -> None:
-        from superlocalmemory.llm.backbone import LLMBackbone
-        from superlocalmemory.core.engine_wiring import (
-            init_embedder, init_encoding, init_retrieval, wire_hooks,
-            _init_auto_invoker, _init_consolidation,
-        )
-
         # Built on the space the store holds, never on a model config.json merely
         # names: a different model is re-indexed in the background by the daemon
         # (core/embedding_live.py, core/embedding_reindex.py), not here.
         from superlocalmemory.core.embedding_live import bind_live_space, take_preset_embedder
+        from superlocalmemory.core.engine_wiring import (
+            _init_auto_invoker,
+            _init_consolidation,
+            init_embedder,
+            init_encoding,
+            init_retrieval,
+            wire_hooks,
+        )
+        from superlocalmemory.llm.backbone import LLMBackbone
         bind_live_space(self._config, self._db)
         self._embedder = take_preset_embedder(self._config) or init_embedder(self._config)
 
@@ -404,12 +406,13 @@ class MemoryEngine:
         _llm_up = getattr(self, "_llm", None) is not None
         for _warning in validate_mode_config(
             self._config.mode, has_llm=_llm_up, has_cloud_llm=_llm_up,
+            embedding=self._config.embedding, llm=self._config.llm,
         ):
             logger.warning("Mode config: %s", _warning)
 
-        from superlocalmemory.trust.scorer import TrustScorer
-        from superlocalmemory.trust.provenance import ProvenanceTracker
         from superlocalmemory.compliance.eu_ai_act import EUAIActChecker
+        from superlocalmemory.trust.provenance import ProvenanceTracker
+        from superlocalmemory.trust.scorer import TrustScorer
 
         self._trust_scorer = TrustScorer(self._db)
 
@@ -503,7 +506,9 @@ class MemoryEngine:
         """
         try:
             from superlocalmemory.cli.pending_store import (
-                get_pending, mark_done, mark_failed,
+                get_pending,
+                mark_done,
+                mark_failed,
             )
         except ImportError:
             return
@@ -1073,6 +1078,7 @@ class MemoryEngine:
         from superlocalmemory.core.engine_ingestion import _require_known_profile
         _require_known_profile(self, pid)
         from datetime import datetime, timezone
+
         from superlocalmemory.core.engine_ingestion import content_passes_admission
         if not content_passes_admission(content):
             return []

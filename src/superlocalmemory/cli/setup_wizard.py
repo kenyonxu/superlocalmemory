@@ -9,6 +9,7 @@ For pip: triggered on first `slm` command when .setup-complete is missing.
 Part of Qualixar | Author: Varun Pratap Bhardwaj
 """
 from __future__ import annotations
+
 import os
 import platform
 import shutil
@@ -17,6 +18,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -108,7 +111,7 @@ def _download_model(model_name: str, label: str) -> bool:
     Returns True on success.
     """
     print(f"\n  Downloading {label}: {model_name}")
-    print(f"  (this may take a few minutes on first run)\n")
+    print("  (this may take a few minutes on first run)\n")
     # H-03: pass the model name as argv, never interpolated into executed
     # source, so a crafted model_name cannot become arbitrary Python.
     script = (
@@ -148,7 +151,7 @@ def _download_model(model_name: str, label: str) -> bool:
 def _download_reranker(model_name: str) -> bool:
     """Download cross-encoder reranker model."""
     print(f"\n  Downloading reranker: {model_name}")
-    print(f"  (cross-encoder for result re-ranking)\n")
+    print("  (cross-encoder for result re-ranking)\n")
     # H-03: model name via argv, never interpolated into executed source.
     script = (
         _EXIT_WITH_PARENT
@@ -170,9 +173,9 @@ def _download_reranker(model_name: str) -> bool:
             },
         )
         if result.returncode == 0:
-            print(f"  ✓ Reranker ready")
+            print("  ✓ Reranker ready")
             return True
-        print(f"  ✗ Reranker download failed")
+        print("  ✗ Reranker download failed")
         return False
     except Exception as exc:
         print(f"  ✗ Reranker error: {exc}")
@@ -184,7 +187,7 @@ def _download_compressor(model_name: str) -> bool:
     lazy-downloads on first use in prose_llmlingua.py.
     """
     print(f"\n  Downloading compression model: {model_name}")
-    print(f"  (LLMLingua-2 prose compressor, ~560MB — aggressive mode only)\n")
+    print("  (LLMLingua-2 prose compressor, ~560MB — aggressive mode only)\n")
     # H-03: model name via argv, never interpolated into executed source.
     script = (
         "import sys; from llmlingua import PromptCompressor; "
@@ -206,12 +209,12 @@ def _download_compressor(model_name: str) -> bool:
             },
         )
         if result.returncode == 0:
-            print(f"  ✓ Compression model ready")
+            print("  ✓ Compression model ready")
             return True
-        print(f"  ✗ Compression model download failed (will lazy-download on first use)")
+        print("  ✗ Compression model download failed (will lazy-download on first use)")
         return False
     except ImportError:
-        print(f"  ⚠ llmlingua not installed — compression model will download on first use")
+        print("  ⚠ llmlingua not installed — compression model will download on first use")
         return False
     except Exception as exc:
         print(f"  ✗ Compression model error: {exc}")
@@ -656,6 +659,21 @@ def _install_autostart_service() -> bool:
 # ---------------------------------------------------------------------------
 # Mode C provider config (preserved from original)
 # ---------------------------------------------------------------------------
+def _named_provider_mode(provider_name: str, target_mode: str | None):
+    """The mode ``slm provider set <provider>`` saves: ``--mode`` when given,
+    else B for a local model (Ollama) and C for a hosted one.
+
+    4.2.9: named providers were always saved as Mode C and ``--mode`` was read
+    only for ``custom``, so ``slm provider set ollama --mode b`` left Mode C.
+    """
+    from superlocalmemory.storage.models import Mode
+
+    choice = (target_mode or ("b" if provider_name == "ollama" else "c")).strip().lower()
+    if choice not in ("b", "c"):
+        raise ValueError(f"--mode must be b or c for an LLM provider, not {target_mode!r}")
+    return Mode.B if choice == "b" else Mode.C
+
+
 def configure_provider(
     config: object,
     provider_name: str | None = None,
@@ -676,7 +694,6 @@ def configure_provider(
     ``model``/``target_mode`` are only consulted for that case.
     """
     from superlocalmemory.core.config import SLMConfig
-    from superlocalmemory.storage.models import Mode
     presets = SLMConfig.provider_presets()
     providers = list(presets.keys())
     interactive_selection = provider_name is None
@@ -737,7 +754,7 @@ def configure_provider(
     # preset model as the default. Non-interactive runs (``slm provider set``,
     # CI) keep the preset model — unchanged zero-prompt behavior. Logic lives
     # in cli.model_choice (this file is already past the 800-line guideline).
-    chosen_model = preset["model"]
+    chosen_model = (model or "").strip() or preset["model"]
     if interactive_selection and is_interactive():
         from superlocalmemory.cli.model_choice import pick_mode_c_model
         chosen_model = pick_mode_c_model(
@@ -749,8 +766,9 @@ def configure_provider(
     # configured a local or promoted Cozo/Lance deployment.  Keep every
     # unrelated setting intact and change only the mode/provider contract.
     from superlocalmemory.core.config import LLMConfig
+    mode = _named_provider_mode(provider_name, target_mode)
     updated = config if isinstance(config, SLMConfig) else SLMConfig.load()
-    updated.mode = Mode.C
+    updated.mode = mode
     updated.llm = LLMConfig(
         provider=provider_name,
         model=chosen_model,
@@ -758,6 +776,10 @@ def configure_provider(
         api_base=preset["base_url"],
     )
     updated.save(mode_change=True)
-    SLMConfig.write_current_mode(Mode.C, updated.base_dir)
+    # 4.2.9: the per-mode file too, or the next `slm mode` switch restores the
+    # model this command just replaced.
+    updated.save(SLMConfig._mode_config_path(updated.base_dir, mode))
+    SLMConfig.write_current_mode(mode.value, updated.base_dir)
+    print(f"  Mode: {mode.value.upper()}")
     print(f"  Provider: {provider_name}")
     print(f"  Model: {chosen_model}")

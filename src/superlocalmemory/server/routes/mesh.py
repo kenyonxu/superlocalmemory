@@ -12,6 +12,8 @@ Part of Qualixar | Author: Varun Pratap Bhardwaj
 from __future__ import annotations
 
 import re
+import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -182,17 +184,37 @@ def _send_error_status(error: str) -> int:
 
 # -- Routes --
 
+
+@contextmanager
+def _busy_is_retryable():
+    """A mesh write that lost the race for the database is a 503 to retry, not a 500.
+
+    Heartbeats and registrations share memory.db with memory saves. Under heavy
+    load they can still find it locked after every retry; that is a busy moment,
+    not a fault, so the caller is told to try again shortly (it does, every
+    minute) instead of receiving a stack trace.
+    """
+    try:
+        yield
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if "database is locked" in message or "database is busy" in message:
+            raise HTTPException(503, detail="mesh is busy; retry shortly",
+                                headers={"Retry-After": "2"}) from exc
+        raise
+
 @router.post("/register")
 def register(req: RegisterRequest, request: Request):
     broker = _get_broker(request)
     if not req.session_id:
         raise HTTPException(400, detail="session_id required")
     _refuse_web_peer(broker, req.session_id)
-    result = broker.register_peer(
-        req.session_id, req.summary, req.host, req.port,
-        req.project_path, req.agent_type, profile_id=_active_profile(),
-        app_name=req.app, display_name=req.display_name,
-    )
+    with _busy_is_retryable():
+        result = broker.register_peer(
+            req.session_id, req.summary, req.host, req.port,
+            req.project_path, req.agent_type, profile_id=_active_profile(),
+            app_name=req.app, display_name=req.display_name,
+        )
     if result.get("ok") is False:
         raise HTTPException(409, detail=result.get("error", "registration refused"))
     return result
@@ -353,7 +375,8 @@ def heartbeat(req: HeartbeatRequest, request: Request):
     """Update peer liveness without blocking the daemon's async event loop."""
     broker = _get_broker(request)
     _refuse_web_peer(broker, req.peer_id)
-    result = broker.heartbeat(req.peer_id, profile_id=_active_profile())
+    with _busy_is_retryable():
+        result = broker.heartbeat(req.peer_id, profile_id=_active_profile())
     if not result.get("ok"):
         raise HTTPException(404, detail=result.get("error", "peer not found"))
     return result
@@ -363,8 +386,9 @@ def heartbeat(req: HeartbeatRequest, request: Request):
 def summary(req: SummaryRequest, request: Request):
     broker = _get_broker(request)
     _refuse_web_peer(broker, req.peer_id)
-    result = broker.update_summary(req.peer_id, req.summary,
-                                   profile_id=_active_profile())
+    with _busy_is_retryable():
+        result = broker.update_summary(req.peer_id, req.summary,
+                                       profile_id=_active_profile())
     if not result.get("ok"):
         raise HTTPException(404, detail=result.get("error", "peer not found"))
     return result
@@ -396,8 +420,8 @@ def _strict_peer_key(broker, from_peer: str) -> str:
 def _admit_remote_send(client_host: str) -> None:
     """Admission gate parity (closes the P1 bypass for inbound remote send)."""
     try:
-        from superlocalmemory.core.admission import AdmissionDenied, admit, resolve_actor
         from superlocalmemory.core.actor_context import Transport
+        from superlocalmemory.core.admission import AdmissionDenied, admit, resolve_actor
         from superlocalmemory.core.operation_request import OperationKind
     except ImportError:
         return

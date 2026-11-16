@@ -18,6 +18,7 @@ what each test sets. Every program it may call is a stub that logs its argv.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import subprocess
@@ -158,7 +159,9 @@ def test_nothing_to_run_says_how_to_fix_it_and_builds_nothing(tmp_path) -> None:
     result = _run(tmp_path, stubs, LITERAL_HOST_ENV)
     assert result.returncode == 1
     assert "pipx install superlocalmemory" in result.stderr
-    assert "docs.astral.sh/uv" in result.stderr
+    # uv named, not linked: a remote URL beside TOKENIZERS_PARALLELISM in this
+    # script is held by the Claude plugin directory as a credential leaving.
+    assert "install uv" in result.stderr.lower()
     assert result.stdout == "", "stdout is the MCP channel"
     assert _log_lines(log) == [], "no venv is built unless asked"
 
@@ -187,6 +190,25 @@ def test_an_installed_slm_still_wins_over_uvx(tmp_path) -> None:
 
 
 def test_launcher_is_executable_and_identical_in_every_tree() -> None:
-    src = (Path(__file__).resolve().parents[2] / "plugin-src" / "scripts" / "slm-launch").read_bytes()
-    assert LAUNCHER.read_bytes() == src
+    repo = Path(__file__).resolve().parents[2]
+    version = json.loads((repo / "plugin-src" / "manifest.json").read_text(encoding="utf-8"))["version"]
+    src = (repo / "plugin-src" / "scripts" / "slm-launch").read_text(encoding="utf-8")
+    # Identical except the release, which the build writes in literally.
+    assert "__SLM_RELEASE__" in src
+    assert LAUNCHER.read_text(encoding="utf-8") == src.replace("__SLM_RELEASE__", version)
+    # Fork PyPI identity: the launcher pins mslm-memory (Task 5 identity ruling,
+    # consistent with _pin() above), not upstream's superlocalmemory.
+    assert f'uvx --from "mslm-memory=={version}" slm mcp' in LAUNCHER.read_text(encoding="utf-8")
     assert os.access(LAUNCHER, os.X_OK)
+
+
+def test_launcher_exports_no_secret_like_names() -> None:
+    # Anthropic's plugin directory holds a plugin for review ("forwards a
+    # credential", MCP_FORWARDS_CREDENTIAL_ENV) when the MCP launch path names
+    # anything token-, key- or secret-like. TOKENIZERS_PARALLELISM alone did it.
+    import re
+
+    src = Path(__file__).resolve().parents[2] / "plugin-src" / "scripts" / "slm-launch"
+    text = src.read_text(encoding="utf-8")
+    flagged = re.findall(r"(?i)\b\w*(token|secret|api_?key|password|credential)\w*\b", text)
+    assert flagged == [], f"secret-like names in slm-launch: {flagged}"

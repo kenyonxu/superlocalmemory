@@ -48,11 +48,16 @@ class Ingested:
 
 
 class PartialSave(RuntimeError):
-    """A file failed part-way: ``entries`` are the parts already saved, kept so they stay owned."""
+    """A file failed part-way: ``entries`` are the parts already saved, kept so they stay owned.
 
-    def __init__(self, entries: list[dict[str, Any]]):
+    ``part``/``total`` name the part that failed (1-based), so the folder report can say where
+    the file stopped, not only that it did (issue #319)."""
+
+    def __init__(self, entries: list[dict[str, Any]], *, part: int = 0, total: int = 0):
         super().__init__("a folder file was saved only in part")
         self.entries = entries
+        self.part = part
+        self.total = total
 
 
 class SaveBudgetSpent(PartialSave):
@@ -76,7 +81,7 @@ def split_markdown(text: str, limit: int = SECTION_LIMIT) -> list[str]:
     for line in text.splitlines(keepends=True):
         if _FENCE.match(line):
             fenced = not fenced
-        if not fenced and _HEADING.match(line) and any(l.strip() for l in sections[-1]):
+        if not fenced and _HEADING.match(line) and any(ln.strip() for ln in sections[-1]):
             sections.append([])
         sections[-1].append(line)
     parts: list[str] = []
@@ -139,7 +144,7 @@ def save_parts(host: SourceHost, runtime: Any, source: dict, relpath: str, parts
                 raise SaveBudgetSpent(out.entries) from None
             continue
         except Exception as exc:
-            raise PartialSave(out.entries) from exc
+            raise PartialSave(out.entries, part=number, total=len(parts)) from exc
         # ``k`` is kept beside the ids: a retry of this version re-sends the same key, and the
         # entry it gets back is recognised as the same save (see ``reconcile._supersede``).
         out.entries.append({"m": saved.memory_id, "f": list(saved.fact_ids), "v": version, "k": key})
@@ -158,8 +163,9 @@ class KeyFacts:
 def resolve_keys(runtime: Any, profile_id: str, keys: list[str]) -> KeyFacts:
     """Resolve folder saves recorded only by their key.
 
-    A key is *settled* when it can no longer gain facts: its operation holds fact ids, finished,
-    or failed for good; or, with no operation row, the admission journal says the request was
+    A key is *settled* when it can no longer gain facts: its operation finished or failed for good
+    (fact ids alone do not settle it: enrichment adds facts after the save is queryable, #297);
+    or, with no operation row, the admission journal says the request was
     rejected, committed (the receipt names the facts) or never admitted. Only a key that may still
     commit is *pending*: an operation that is raw, queued, enriching or retryable, or a journal
     entry still prepared or dispatched, or a journal that cannot be read. Callers treat hiding or
@@ -186,8 +192,7 @@ def resolve_keys(runtime: Any, profile_id: str, keys: list[str]) -> KeyFacts:
                 + ",".join("?" * len(part)) + ")", (profile_id, *part))
             for row in rows:
                 ids = [str(f) for column in (row[4], row[5]) for f in json.loads(column or "[]")]
-                done = bool(ids) or row[1] == "complete" or is_terminal_failure(row[1], row[2], row[3])
-                (settled if done else live).add(str(row[0]))
+                (settled if _finished(row) else live).add(str(row[0]))
                 found += ids
     except Exception as exc:  # noqa: BLE001 - what cannot be looked up is not known to be hidden
         logger.warning("could not look up queued folder saves (%s)", type(exc).__name__)
@@ -205,6 +210,38 @@ def resolve_keys(runtime: Any, profile_id: str, keys: list[str]) -> KeyFacts:
         else:
             found += verdict
     return KeyFacts(facts=found, pending=pending)
+
+
+def _finished(row: Any) -> bool:
+    """True when an operation row (key, state, attempts, next retry, ...) can gain no more facts."""
+    return row[1] == "complete" or is_terminal_failure(row[1], row[2], row[3])
+
+
+def unfinished_keys(runtime: Any, profile_id: str, keys: list[str]) -> list[str]:
+    """Keys of committed folder saves whose operation may still gain facts (enrichment not done).
+
+    A committed save's receipt names only the facts that were queryable when it returned; the rest
+    land on the same memory later (#297). Hiding such a save now would leave those facts visible,
+    so callers count it as not done. A key with no operation row has nothing left to add. A ledger
+    that cannot be read leaves every key unfinished.
+    """
+    db = getattr(runtime, "_db", None)
+    if db is None or not keys:
+        return []
+    unfinished: list[str] = []
+    try:
+        for i in range(0, len(keys), 400):
+            part = keys[i:i + 400]
+            rows = db.execute(
+                "SELECT idempotency_key, state, attempt_count, next_retry_at"
+                " FROM ingestion_operations WHERE profile_id = ?"
+                " AND source_type IN ('folder', 'media') AND idempotency_key IN ("
+                + ",".join("?" * len(part)) + ")", (profile_id, *part))
+            unfinished += [str(row[0]) for row in rows if not _finished(row)]
+    except Exception as exc:  # noqa: BLE001 - what cannot be looked up is not known to be finished
+        logger.warning("could not look up folder saves (%s)", type(exc).__name__)
+        return list(keys)
+    return unfinished
 
 
 def _journal_verdict(runtime: Any, profile_id: str, key: str) -> list[str] | None:
@@ -314,7 +351,7 @@ def ingest_image(host: SourceHost, runtime: Any, source: dict, relpath: str, dat
 
 
 def facts_of(runtime: Any, memory_ids: list[str]) -> list[str]:
-    """Fact ids of memories whose receipt did not list them (pictures)."""
+    """Every fact id the memories have now, including those added after their receipt (#297)."""
     db = getattr(runtime, "_db", None)
     if db is None or not memory_ids:
         return []
@@ -345,5 +382,7 @@ def any_archived(runtime: Any, memory_ids: list[str]) -> bool:
     return len(rows) > 0
 
 
-__all__ = ["Ingested", "KeyFacts", "SCREEN_BYTES", "SaveBudgetSpent", "any_archived", "facts_of", "ingest_image", "ingest_pdf", "ingest_text",
-           "load_verified", "provenance", "resolve_keys", "save_parts", "screen", "split_markdown", "split_text"]
+__all__ = ["Ingested", "KeyFacts", "SCREEN_BYTES", "SaveBudgetSpent", "any_archived", "facts_of", "ingest_image",
+           "ingest_pdf", "ingest_text",
+           "load_verified", "provenance", "resolve_keys", "save_parts", "screen", "split_markdown", "split_text",
+           "unfinished_keys"]

@@ -220,9 +220,12 @@ def _plan(version: str):
         ("server.json version",
          lambda: _read_json_at("server.json", ("version",)),
          lambda: _sub_json_at("server.json", ("version",), version)),
-        ("server.json npm package",
+        ("server.json PyPI package",
          lambda: _read_json_at("server.json", ("packages", 0, "version")),
          lambda: _sub_json_at("server.json", ("packages", 0, "version"), version)),
+        ("server.json npm package",
+         lambda: _read_json_at("server.json", ("packages", 1, "version")),
+         lambda: _sub_json_at("server.json", ("packages", 1, "version"), version)),
         ("plugin-src/requirements.txt",
          # Fork identity: the plugin pins the fork's published package,
          # mslm-memory (package renamed from superlocalmemory; see
@@ -314,6 +317,12 @@ def _plan(version: str):
          lambda: _sub_regex("plugin-src/hermes/plugin.yaml",
                             r"^version:\s*(\S+)\s*$",
                             "version: {v}", version)),
+        # The root SKILL.md (the CLI cheat sheet agents read) declares its own
+        # version in frontmatter. It sat at 4.1.25 through three releases.
+        ("SKILL.md frontmatter version",
+         lambda: _read("SKILL.md", r'^version:\s*"([^"]+)"'),
+         lambda: _sub_regex("SKILL.md", r'^version:\s*"([^"]+)"',
+                            'version: "{v}"', version)),
         # README.md no longer carries a release stamp (no title version, no
         # summary version, no badge), so it is not a source. Listing a source
         # that does not exist made --check red on every tree and made a real

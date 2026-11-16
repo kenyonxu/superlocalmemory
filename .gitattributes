@@ -9,14 +9,8 @@
 *.bat text -eol
 *.cmd text -eol
 
-# Git LFS Configuration for SuperLocalMemory V2
-# Large visual assets are stored in LFS to keep repo lightweight
-# Videos (largest files)
-*.mp4 filter=lfs diff=lfs merge=lfs -text
-# Animated GIFs
-*.gif filter=lfs diff=lfs merge=lfs -text
-# Large PNGs (> 1MB)
-assets/contact-sheet.png filter=lfs diff=lfs merge=lfs -text
-assets/screenshots/**/*-annotated.png filter=lfs diff=lfs merge=lfs -text
-# Keep small files in git (CLI mockups, thumbnails, optimized WebP)
-# These are needed for quick preview and don't bloat repo significantly
+# Git LFS rules live in assets/.gitattributes and docs/.gitattributes, not
+# here: the Claude plugin directory refuses a plugin when any .gitattributes at
+# the repository root, above the plugin folder or inside it rewrites files
+# (Git LFS included), because installed files could differ from what it
+# validated (claude.com/docs/plugins/pre-submission-checklist).

@@ -264,7 +264,7 @@ it from there. Safe to re-run.
 ## Choosing how many tools
 
 Every plugin and extension here starts SuperLocalMemory with the default tool
-set, `full`: 58 tools covering memory, SLM-Mesh, optimize and bounded loops
+set, `full`: 58 tools covering memory, SLM-Mesh, optimize and bounded loops (5 more while images are on)
 (63 while pictures and documents are on). None of them sets a tool set of its
 own, so one saved choice applies to all of them:
 

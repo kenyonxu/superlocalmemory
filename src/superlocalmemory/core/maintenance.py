@@ -34,6 +34,7 @@ from superlocalmemory.core.langevin_tier import (  # noqa: F401 - re-exported
     _langevin_pass,
     _retention_radius,
     _seed_langevin_position,
+    langevin_lifecycle,
 )
 
 if TYPE_CHECKING:
@@ -137,10 +138,7 @@ def close_stale_sessions(
     if idle_hours <= 0 or max_per_pass <= 0:
         return 0
 
-    from superlocalmemory.core.store_pipeline import (
-        _session_already_summarised,
-        run_close_session,
-    )
+    from superlocalmemory.core.store_pipeline import run_close_session
 
     cutoff = (datetime.now(UTC) - timedelta(hours=float(idle_hours))).isoformat()
     # Over-fetch slightly so already-closed rows in the window do not starve
@@ -175,9 +173,7 @@ def close_stale_sessions(
         sid = str(d.get("session_id") or "")
         if not sid:
             continue
-        if _session_already_summarised(db, profile_id, sid):
-            continue
-        try:
+        try:  # an already summarised session returns 0 and is not counted
             n = run_close_session(sid, profile_id, db=db)
         except Exception as exc:
             logger.warning("stale session close failed for %s: %s", sid, exc)
@@ -320,17 +316,16 @@ def run_maintenance(
     except Exception as exc:  # pragma: no cover — legacy DB / missing FTS
         logger.debug("expansion backfill skipped: %s", exc)
 
+    # The person's forgetting settings, the ones the decay pass reads: every
+    # Langevin tier below is decided by the same function with the same
+    # settings (EbbinghausCurve.retention_and_zone), never by the defaults.
+    from superlocalmemory.math.ebbinghaus import EbbinghausCurve
+
+    tier_curve = EbbinghausCurve(config.forgetting)
+
     # 1a. Backfill: seed uninitialized facts with metadata-aware positions (B+C)
     if config.math.langevin_persist_positions:
         try:
-            from superlocalmemory.math.langevin import LangevinDynamics
-
-            ld = LangevinDynamics(
-                dim=_LANGEVIN_DIM,
-                dt=config.math.langevin_dt,
-                temperature=config.math.langevin_temperature,
-            )
-
             backfilled = 0
             for f in facts:
                 if f.langevin_position is not None:
@@ -347,10 +342,11 @@ def run_maintenance(
                 position = _seed_langevin_position(
                     f.access_count, age_days, f.importance,
                     config.math.langevin_temperature, _LANGEVIN_DIM,
-                    fact_id=f.fact_id,
+                    fact_id=f.fact_id, curve=tier_curve,
                 )
-                weight = ld.compute_lifecycle_weight(position)
-                lifecycle = ld.get_lifecycle_state(weight).value
+                lifecycle = langevin_lifecycle(
+                    f.access_count, age_days, f.importance, tier_curve,
+                )
                 _persist_lifecycle(
                     db, profile_id, [(f.fact_id, lifecycle, position)],
                 )
@@ -387,7 +383,7 @@ def run_maintenance(
                 })
 
             if fact_dicts:
-                results = _langevin_pass(ld, fact_dicts)
+                results = _langevin_pass(ld, fact_dicts, tier_curve)
                 _persist_lifecycle(db, profile_id, [
                     (r["fact_id"], r["lifecycle"], r["position"])
                     for r in results
@@ -433,7 +429,7 @@ def run_maintenance(
                         "access_count": f.access_count,
                         "age_days": age_days,
                         "importance": f.importance,
-                    }])
+                    }], tier_curve)
                     new_pos, lifecycle = coupled["position"], coupled["lifecycle"]
                     _persist_lifecycle(
                         db, profile_id, [(f.fact_id, lifecycle, new_pos)],
@@ -623,7 +619,7 @@ def run_maintenance(
     # drops bloat. Future writes go through ObservationBuilder.SUMMARY_*
     # bounds and stay clean.
     try:
-        consolidated = db.execute(
+        db.execute(
             """
             UPDATE entity_profiles
                SET knowledge_summary = SUBSTR(knowledge_summary, 1, 2047) || '…',

@@ -22,12 +22,11 @@ import logging
 import threading
 import time
 
-from mcp.types import ToolAnnotations
-
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.mcp.agent_context import get_current_agent_id
 from superlocalmemory.mcp.remote_caller import current_remote_key_id
+from superlocalmemory.mcp.tool_hints import ADDS, READ_ONLY, SETS
 from superlocalmemory.optimize.compress.ccr import _UUID4_RE, CCRStore
 from superlocalmemory.optimize.compress.router import CompressRouter as CompressRouter
 from superlocalmemory.optimize.compress.router import CompressTextResult as CompressTextResult
@@ -113,7 +112,7 @@ def register_optimize_tools(server) -> None:
     Compatible with FastMCP, _FilteredServer, and test _MockServer.
     """
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+    @server.tool(title="Compress Text", annotations=ADDS)
     @admits(OperationKind.CONSOLIDATE)
     async def slm_compress(
         content: str,
@@ -140,7 +139,7 @@ def register_optimize_tools(server) -> None:
         )
         return compress(ctx, content, mode, reversible, ttl_seconds)
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Retrieve Compressed Text", annotations=READ_ONLY)
     async def slm_retrieve(ccr_id: str) -> dict:
         """Retrieve original text stored during a lossy slm_compress call.
 
@@ -182,7 +181,7 @@ def register_optimize_tools(server) -> None:
                 "error": f"internal error: {exc}",
             }
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+    @server.tool(title="Cache Value", annotations=SETS)
     @admits(OperationKind.REMEMBER)
     async def slm_cache_set(key: str, value: str, ttl_seconds: int = 86400) -> dict:
         """Cache a result you want to reuse (tool output, file read, search result).
@@ -233,7 +232,7 @@ def register_optimize_tools(server) -> None:
             logger.error("slm_cache_set failed (fail-open): %s", exc)
             return {"ok": False, "stored": False, "note": f"internal error: {exc}"}
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Cached Value", annotations=READ_ONLY)
     async def slm_cache_get(key: str) -> dict:
         """Retrieve a previously cached result.
 
@@ -275,7 +274,7 @@ def register_optimize_tools(server) -> None:
                 "note": f"internal error: {exc}",
             }
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Get Optimization Stats", annotations=READ_ONLY)
     async def slm_optimize_stats() -> dict:
         """Return compression and cache statistics.
 

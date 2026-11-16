@@ -197,7 +197,24 @@ from superlocalmemory.storage.migrations import (
     M063_blank_temporal_dates_are_null as _M063,
 )
 from superlocalmemory.storage.migrations import (
-    M064_provenance_kind_column as _M064,
+    M064_orphan_index_rows_are_removed as _M064,
+)
+from superlocalmemory.storage.migrations import (
+    M065_fabricated_dates_are_removed as _M065,
+)
+from superlocalmemory.storage.migrations import (
+    M066_wrongly_archived_memories_are_restored as _M066,
+)
+from superlocalmemory.storage.migrations import (
+    M067_projection_follows_every_fact_change as _M067,
+)
+from superlocalmemory.storage.migrations import (
+    M068_newer_bookkeeping_shapes_are_flagged as _M068,
+)
+# Fork addition kept beside upstream's M064: distinct module, distinct NAME,
+# shared serial 64 (see the DEFERRED_MIGRATIONS tail for the ordering note).
+from superlocalmemory.storage.migrations import (
+    M064_provenance_kind_column as _M064_fork,
 )
 
 # Order matters: M003 creates the log table. The runner handles M003's own
@@ -420,10 +437,37 @@ DEFERRED_MIGRATIONS: list[Migration] = [
     # (M057) can serve. Deferred: it reads temporal_events.
     Migration(name=_M063.NAME, db_target="memory", ddl=_M063.DDL,
               dependencies=(_M057.NAME,)),
+    # M064 removes the index rows of memories that no longer exist (a delete
+    # that failed partway). Deferred: it reads atomic_facts and vector_row_map,
+    # which engine init creates.
+    Migration(name=_M064.NAME, db_target="memory", ddl=_M064.DDL),
+    # M065 takes the made-up dates of builds before 4.1.6 out of facts and their
+    # date rows, with an undo record. Deferred: it reads temporal_events,
+    # fact_context and bm25_tokens, which engine init creates.
+    Migration(name=_M065.NAME, db_target="memory", ddl=_M065.DDL),
+    # M066 restores memories the hours-clock ELC step archived (#266) to the zone
+    # the store-scaled clock gives them, with an undo record. Deferred: it reads
+    # fact_retention and the decay inputs, which engine init creates.
+    Migration(name=_M066.NAME, db_target="memory", ddl=_M066.DDL),
+    # M067 queues a fact for the graph and vector copies whenever its visibility
+    # or entities change (#296). Deferred: it watches columns engine init and
+    # earlier migrations add, and the queue table M033 creates.
+    Migration(name=_M067.NAME, db_target="memory", ddl=_M067.DDL,
+              dependencies=(_M033.NAME,)),
+    # M068 runs M062's stub pass again with the current rule, for the shapes it
+    # learned since (agent checkpoints without "[agent]", "the session ended",
+    # git-only Stop summaries). Deferred: it reads atomic_facts.non_answer.
+    Migration(name=_M068.NAME, db_target="memory", ddl=_M068.DDL,
+              dependencies=(_M060.NAME, _M062.NAME)),
     # Fork addition: governance gating tag (controlled vocabulary, NULL =
     # not yet tagged). Renumbered from fork's historical M052 after upstream
     # took M052-M063. Idempotent on stores that applied the old name: the
     # PRAGMA column guard makes re-application a no-op that only records.
-    Migration(name=_M064.NAME, db_target="memory", ddl=_M064.DDL,
+    # Upstream later shipped its own M064 (orphan index rows) plus M065-M068;
+    # the fork entry keeps its historical serial and NAME (both must stay
+    # stable for stores that already recorded it) and rides at the list tail
+    # after upstream's M068. The serial collision is name-unique, and the
+    # ceiling tracks the max serial (68), so the invariant holds.
+    Migration(name=_M064_fork.NAME, db_target="memory", ddl=_M064_fork.DDL,
               dependencies=(_M046.NAME,)),
 ]

@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from superlocalmemory.core.derivation_lineage import checkpoint_with_lineage
 from superlocalmemory.core.ingestion_command import (
@@ -25,8 +25,8 @@ from superlocalmemory.core.ingestion_command import (
 )
 
 if TYPE_CHECKING:
-    from superlocalmemory.memory_core import PreparedContent
     from superlocalmemory.core.engine import MemoryEngine
+    from superlocalmemory.memory_core import PreparedContent
     from superlocalmemory.storage.models import AtomicFact, MemoryRecord
 
 
@@ -35,6 +35,35 @@ logger = logging.getLogger(__name__)
 
 _PREBUILT_FACT_KEY = "_slm_prebuilt_fact_v1"
 _DERIVATION_VERSION = "v3.7-ingestion-1"
+
+
+def _nothing_left_live(db: Any, operation: IngestionOperation) -> bool:
+    """True when every queryable fact of the save is archived, erased or being erased.
+
+    That is a save retired before it was enriched (a folder note revised or
+    deleted while it was still queryable, #297), not a broken one. A fact that
+    is still live in this profile, or that sits in another profile, keeps the
+    "mismatch or missing fact" error: those are real faults.
+    """
+    ids = list(operation.queryable_fact_ids)
+    if not ids:
+        return False
+    marks = ",".join("?" for _ in ids)
+    rows = db.execute(
+        f"SELECT fact_id, profile_id, COALESCE(archive_status, 'live') AS status "
+        f"FROM atomic_facts WHERE fact_id IN ({marks})", tuple(ids))
+    try:
+        erasing = {str(dict(r)["fact_id"]) for r in db.execute(
+            f"SELECT fact_id FROM projection_tombstones WHERE profile_id=? "
+            f"AND fact_id IN ({marks})", (operation.profile_id, *ids))}
+    except Exception:  # noqa: BLE001 -- a schema without tombstones erases nothing
+        erasing = set()
+    for row in map(dict, rows):
+        if row["profile_id"] != operation.profile_id:
+            return False
+        if row["status"] == "live" and str(row["fact_id"]) not in erasing:
+            return False
+    return True
 
 
 def _require_known_profile(engine: "MemoryEngine", profile_id: str) -> None:
@@ -201,7 +230,9 @@ def build_immediate_admission_handler(
         if not request.trusted_actor_id:
             raise ValueError("trusted actor identity is required")
         if not content_passes_admission(request.content):
-            return []
+            from superlocalmemory.core.ingestion_command import IngestionRejectedError
+
+            raise IngestionRejectedError(code="admission_policy")
 
         from datetime import UTC, datetime
 
@@ -225,9 +256,15 @@ def build_immediate_admission_handler(
             content,
             max_verbatim_chars=max_verbatim_chars,
             max_ingest_bytes=max_ingest_bytes,
+            source_type=request.source_type,
         )
         if gate.rejected:
-            return []
+            from superlocalmemory.core.ingestion_command import IngestionRejectedError
+
+            raise IngestionRejectedError(
+                gate.rejection_reason or "ingestion produced no queryable facts",
+                code=f"ingest_gate:{gate.rejection_code or 'rejected'}",
+            )
         fact_content = gate.fact_content
         now = datetime.now(UTC).isoformat()
         observation_date = request.session_date or now[:10]
@@ -844,6 +881,11 @@ def build_engine_ingestion_command(
             operation.profile_id,
         )
         if len(facts) != len(operation.queryable_fact_ids):
+            if _nothing_left_live(engine._db, operation):
+                from superlocalmemory.core.materialization_control import (
+                    MaterializationSuperseded,
+                )
+                raise MaterializationSuperseded(operation.operation_id)
             raise ValueError("queryable fact profile mismatch or missing fact")
         memory_ids = {fact.memory_id for fact in facts}
         if len(memory_ids) != 1:

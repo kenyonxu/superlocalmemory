@@ -33,11 +33,10 @@ import logging
 from datetime import date, timedelta
 from typing import Any, Callable
 
-from mcp.types import ToolAnnotations
-
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
 from superlocalmemory.infra.data_root import state_path
+from superlocalmemory.mcp.tool_hints import READ_ONLY
 
 logger = logging.getLogger("superlocalmemory.mcp.summaries")
 
@@ -135,7 +134,7 @@ def _community_drill_down(
 def register_summary_tools(server: Any, get_engine: Callable[[], Any]) -> None:
     """Register the read-only summary tool."""
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="Summarize Memories", annotations=READ_ONLY)
     @admits(OperationKind.RECALL)
     async def get_memory_summary(
         kind: str = "day",

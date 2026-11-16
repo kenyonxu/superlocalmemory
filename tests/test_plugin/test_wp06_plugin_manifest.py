@@ -72,11 +72,14 @@ def _load_json(path: Path) -> dict:
 @pytest.fixture(scope="module", autouse=True)
 def _ensure_plugin_generated() -> None:
     """Regenerate ignored plugin outputs before checking the plugin layout."""
-    subprocess.run(
-        ["node", "scripts/build-plugin.mjs", "--quiet"],
-        cwd=REPO,
-        check=True,
-    )
+    from tests.test_plugin._plugin_sandbox import plugin_tree_lock
+
+    with plugin_tree_lock():
+        subprocess.run(
+            ["node", "scripts/build-plugin.mjs", "--quiet"],
+            cwd=REPO,
+            check=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +509,7 @@ class TestGeneratorRoundTrip:
         src = PLUGIN_SRC / ".mcp.json"
         out = PLUGIN_ROOT / ".mcp.json"
         assert src.exists(), f"Source .mcp.json missing: {src}"
-        assert out.exists(), f"plugin/.mcp.json missing"
+        assert out.exists(), "plugin/.mcp.json missing"
         assert src.read_text(encoding="utf-8") == out.read_text(encoding="utf-8"), (
             "plugin/.mcp.json must match plugin-src/.mcp.json byte-for-byte"
         )
@@ -515,7 +518,7 @@ class TestGeneratorRoundTrip:
         src = PLUGIN_SRC / "settings.json"
         out = PLUGIN_ROOT / "settings.json"
         assert src.exists(), f"Source settings.json missing: {src}"
-        assert out.exists(), f"plugin/settings.json missing"
+        assert out.exists(), "plugin/settings.json missing"
         assert src.read_text(encoding="utf-8") == out.read_text(encoding="utf-8"), (
             "plugin/settings.json must match plugin-src/settings.json byte-for-byte"
         )
@@ -524,7 +527,7 @@ class TestGeneratorRoundTrip:
         src = PLUGIN_SRC / "requirements.txt"
         out = PLUGIN_ROOT / "requirements.txt"
         assert src.exists(), f"Source requirements.txt missing: {src}"
-        assert out.exists(), f"plugin/requirements.txt missing"
+        assert out.exists(), "plugin/requirements.txt missing"
         assert src.read_text(encoding="utf-8") == out.read_text(encoding="utf-8"), (
             "plugin/requirements.txt must match plugin-src/requirements.txt byte-for-byte"
         )

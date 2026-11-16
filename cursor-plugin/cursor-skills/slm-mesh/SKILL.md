@@ -12,7 +12,7 @@ when_to_use: |
   - "Wait for the other bot's reply" (mesh_wait)
   - A web app (ChatGPT, Claude on the web, Grok Bot, Muse, Composio) should message the owner's other bots
   - Messages come back marked repeat, or ack_ids appear in a reply
-allowed-tools: mesh_summary, mesh_peers, mesh_send, mesh_inbox, mesh_wait, mesh_state, mesh_lock, mesh_events, mesh_status, Bash
+allowed-tools: mesh_summary, mesh_peers, mesh_send, mesh_inbox, mesh_wait, mesh_state, mesh_lock, mesh_events, mesh_status, Bash(slm:*)
 ---
 
 # slm-mesh — Cross-Session Peer Coordination
@@ -386,4 +386,4 @@ mesh availability.
 
 ---
 
-*SuperLocalMemory v4.2.6 · Qualixar · AGPL-3.0-or-later*
+*SuperLocalMemory v4.2.19 · Qualixar · AGPL-3.0-or-later*

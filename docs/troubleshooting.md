@@ -37,6 +37,10 @@ source ~/.zshrc   # or source ~/.bashrc
 npx superlocalmemory status
 ```
 
+**Installed with `uv tool install`?** The command lives in uv's tool bin
+directory (`uv tool dir --bin`, usually `~/.local/bin`). Run
+`uv tool update-shell` and open a new shell.
+
 ### "Python not found" during setup
 
 SLM requires Python 3.12 or later, up to 3.14.
@@ -122,7 +126,7 @@ This shows which channels contributed what. If BM25 is dominating with weak keyw
 
 ```bash
 slm db regraph --check    # how far the graph copy has drifted; changes nothing
-slm db regraph            # re-derive it from the store
+slm db regraph            # rebuild a drifted copy from the store
 ```
 
 Use it when entity relationships look wrong or after bulk imports.

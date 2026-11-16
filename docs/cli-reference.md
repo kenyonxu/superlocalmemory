@@ -277,6 +277,52 @@ the memory it was about. `slm corrections overtaken [--limit N] [--profile P]`
 lists those closed cases, newest first, and `slm corrections restore-overtaken
 <case_id>` puts one back.
 
+### `slm corrections dismiss`
+
+In Mode B and Mode C, saving a memory can make SLM guess that it updates an
+older one, and SLM files that guess as a `proposed` correction case. Nobody is
+asked to review these, and on a busy store thousands pile up. They do not
+change what recall returns and they do not stop you deleting a memory, so
+nothing is wrong with leaving them. `slm corrections dismiss` clears them in
+one go.
+
+```bash
+slm corrections dismiss                          # dry run: counts and dates only
+slm corrections dismiss --older-than 30          # only cases older than 30 days
+slm corrections dismiss --reason temporal_contradiction --before 2026-11-01
+slm corrections dismiss --apply                  # do it
+```
+
+| Option | Description |
+|--------|-------------|
+| `--reason R` | Only this reason; repeat it for several. One of `temporal_contradiction`, `consolidation_update`, `consolidation_supersede` (default: all three) |
+| `--older-than DAYS` | Only cases created more than DAYS days ago |
+| `--before DATE` | Only cases created before this date, such as `2026-11-01`. With `--older-than`, a case must satisfy both |
+| `--profile P` | Profile to clean (default: the active one) |
+| `--apply` | Actually dismiss. Without it nothing changes |
+| `--json` | Structured output |
+
+The dry run prints how many cases would go, per reason, and the oldest and
+newest creation date. It never prints memory text. With `--apply`, SLM first
+saves a consistent copy of `memory.db` next to it and prints the path, then
+moves the cases in batches of 500 inside the running service.
+
+Only cases SLM proposed by itself and nobody reviewed are touched. A correction
+you made with `slm update`, one you applied, rejected or rolled back, and every
+other profile's cases are left alone. If a case is reviewed while the command
+runs, it is skipped and counted. A dismissed case is not filed again when its
+save is processed again (for example by `slm ops repair-saves`). Each dismissed
+case is kept, with its history, and `slm corrections restore-overtaken
+<case_id>` brings it back as long as both of its memories still exist. If the
+command times out on a very large store, run it again; it carries on where it
+stopped.
+
+**Why there is no bulk reject.** A rejected case counts as a decision somebody
+made, and a memory that is part of a decided case cannot be deleted. Rejecting
+17,000 cases would lock about 34,000 memories for good. Dismissing closes a
+case the same way a delete or an edit of yours already does, so it protects
+nothing and can be undone.
+
 ### `slm list [options]`
 
 List recent memories, newest first, with each one's kind and the id that
@@ -329,6 +375,24 @@ overlapping memories inside a time window, and the output says which happened
 idempotency key. `--note` (up to 1,000 characters) and `--agent` are kept with the
 report. A refused report exits 1 with the reason; `--json` returns the envelope
 with `outcome_id`, `reward`, `attributed` and `duplicate`.
+
+### `slm hide <fact_id>... [--undo] [--json]`
+
+Keeps memories out of recall answers and session starts, without deleting or
+editing them. SLM already does this on its own for machine bookkeeping (a bare
+"session ended <time>" line); `slm hide` is the same thing for a row you decide
+about yourself, such as a vague note. `--undo` shows the memories in answers
+again, and SLM will not hide them automatically after that. Either way the
+decision is yours and no automatic rule or repair changes it.
+
+```bash
+slm recall "what did we decide about caching" --json   # note the result ids
+slm hide <fact_id> <fact_id>
+slm hide --undo <fact_id>
+```
+
+The memories stay stored, listed and counted. Ids from another profile are
+reported as not found; the command exits 1 only when none of the ids matched.
 
 ### `slm health`
 
@@ -957,6 +1021,8 @@ slm evidence export /path/to/bundle.jsonl --profile default
 slm evidence verify /path/to/bundle.jsonl
 slm evidence import /path/to/bundle.jsonl --execute
 slm evidence import /path/to/bundle.jsonl --replace --rollback-dir ./slm-rollback --execute
+slm evidence import /path/to/bundle.jsonl --merge             # preview a merge
+slm evidence import /path/to/bundle.jsonl --merge --rollback-dir ./slm-rollback --execute
 slm evidence rebuild --execute   # Rebuild derived lexical state
 ```
 
@@ -964,7 +1030,8 @@ slm evidence rebuild --execute   # Rebuild derived lexical state
 |-----------|-------------|
 | `export <dest>` | Write a deterministic checksummed JSONL bundle |
 | `verify <bundle>` | Verify checksums and source reconciliation |
-| `import <bundle>` | Import relational truth; a dry run unless `--execute`. Replacing existing memories (`--replace`) also requires `--rollback-dir` |
+| `import <bundle>` | Import relational truth; a dry run unless `--execute`. Without a flag the target profile must be empty. Replacing existing memories (`--replace`) also requires `--rollback-dir` |
+| `import <bundle> --merge` | Add a bundle to a profile that already has memories, for example one copied from another machine. Rows already in the profile are kept unchanged, so merging the same bundle twice changes nothing. The merge stops before writing if an id in the bundle belongs to another profile. Without `--execute` it previews the exact counts; with `--execute` it needs `--rollback-dir` and writes the profile's prior state there first. Entities are not combined across machines. Restart the daemon afterwards so it computes embeddings for the new memories |
 | `rebuild` | Rebuild derived lexical state; a dry run unless `--execute` |
 
 ### `slm diagnostics export <dest>` and `slm diagnostics reliability`
@@ -1047,6 +1114,11 @@ slm config set scope.recall_include_shared true
 | `entity_compilation_enabled` | Per-entity knowledge summaries |
 | `graph_backend`, `vector_backend` | Scale Engine backends (see `slm db scale`) |
 | `scope.default_scope`, `scope.recall_include_global`, `scope.recall_include_shared` | Where new memories go and whether recall includes other profiles' memories (see [Shared memory](shared-memory.md)) |
+| `injection.enabled` | `false` stops SLM adding memories to an agent's context on its own: no session-start context (Claude Code and Codex), no per-prompt or before-web recall, and `session_init` / `prestage_context` return no memories. Explicit `recall` and `search` keep working. Default `true` |
+| `auto_invoke.enabled` | `false` turns off the auto-invoke engine. Default `true`. Takes effect after `slm restart` |
+
+`injection.enabled` is read each time a hook or tool runs, so it applies from the next prompt.
+To check what is set: `slm config get injection.enabled`.
 
 Other settings are changed with their own command (`slm mode`, `slm provider`,
 `slm embedder`, `slm optimize`) or in the dashboard. See
@@ -1305,8 +1377,12 @@ stopped, `--withhold FACT_ID` takes one fact out of answers (undo with
 
 ### `slm db regraph [--check] [--profile P]`
 
-Re-derive the graph copy of your memories from the store. `--check` only reports
-how far the copy has drifted.
+Compare the graph copy of your memories (Cozo, on a promoted store) with the
+store, per profile. A copy that still differs once its update queue is drained is
+rebuilt from the store; recall reads the store while that runs. `--check` only
+reports. With the daemon running this asks the daemon, which owns the copy; with
+SLM stopped it works directly. The daemon also runs this check on every
+maintenance cycle, so a drifted copy heals without you asking.
 
 ### `slm db reembed [--missing-only] [--all-profiles] [--limit N] [--json]`
 

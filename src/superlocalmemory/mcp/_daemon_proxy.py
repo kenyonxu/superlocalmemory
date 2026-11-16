@@ -201,6 +201,7 @@ class DaemonPoolProxy:
             answer_check_skipped,
             in_context_load,
         )
+
         # ``answer_check`` is True (ask as usual), False (skip), or one of the
         # daemon's request words — the bounded-loop gate sends "no_reorder":
         # it needs the verdict, never the reorder, and pays for one per lap.
@@ -289,6 +290,7 @@ class DaemonPoolProxy:
         scope = meta.pop("scope", None)
         shared_with = meta.pop("shared_with", None)
         session_date = meta.pop("session_date", "")
+        speaker = str(meta.pop("speaker", "") or "")
         tags = meta.get("tags", "")
         if isinstance(tags, (list, tuple, set)):
             tags = ",".join(str(tag) for tag in tags)
@@ -317,6 +319,8 @@ class DaemonPoolProxy:
                  "preserve_unprocessable": True}
         if replaces is not None:
             body["replaces"] = replaces
+        if speaker.strip():
+            body["speaker"] = speaker.strip()
         from superlocalmemory.mcp._remember_kind import with_declared_kind
 
         body, flags = with_declared_kind(body, flags, (kind or "").strip())

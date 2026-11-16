@@ -17,10 +17,9 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from mcp.types import ToolAnnotations
-
 from superlocalmemory.core.admission import admits
 from superlocalmemory.core.operation_request import OperationKind
+from superlocalmemory.mcp.tool_hints import DESTROYS, READ_ONLY
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +77,7 @@ def register_ops_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 1. list_failed_operations — surface all stuck/failed/degraded ops
     # ------------------------------------------------------------------
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool(title="List Failed Operations", annotations=READ_ONLY)
     @admits(OperationKind.OPS_INSPECT)
     async def list_failed_operations(
         profile_id: str = "",
@@ -115,7 +114,7 @@ def register_ops_tools(server, get_engine: Callable) -> None:
     # ------------------------------------------------------------------
     # 2. resolve_operation — admin remediation: retry / force / cancel
     # ------------------------------------------------------------------
-    @server.tool(annotations=ToolAnnotations(destructiveHint=True))
+    @server.tool(title="Resolve Failed Operation", annotations=DESTROYS)
     @admits(OperationKind.OPS_RESOLVE)
     async def resolve_operation(
         operation_id: str,

@@ -500,6 +500,9 @@ def _completion_2(state, support):
     print("    slm doctor     — diagnose issues (auto-fix: slm doctor --fix)")
     print("    slm serve install — install auto-start service")
     print("    https://github.com/qualixar/superlocalmemory")
+    from superlocalmemory.cli.star_prompt import print_setup_ask
+
+    print_setup_ask()
 
 
 def _completion_3(state, support):

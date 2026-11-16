@@ -53,6 +53,7 @@ def hook_outputs(monkeypatch, tmp_path):
     """What the real Write/Edit and Stop hooks emit for one short session."""
     import os
     import tempfile
+
     from superlocalmemory.hooks import hook_handlers as hh
 
     for name in os.listdir(tempfile.gettempdir()):
@@ -94,6 +95,11 @@ def test_the_file_change_hook_line_is_a_stub(hook_outputs):
     '[claude] session ended (stop) at 2026-10-13 11:01 in Agentic_official.',
     '[codex] session ended (exit) at 2026-10-13 11:01 in my project.'
     ' | transcript: /tmp/x.jsonl | session_id: 9f8e7d6c-1234',
+    # 4.2.14: ingestion derives this one without its "[agent]" prefix too
+    # (7 such rows were injected at one session start on a real store)
+    'session ended (exit) at 2026-11-07 13:49 in config.',
+    # a derived copy reads "the session ended <date> <time>" (live store, 9 Nov 2026)
+    'the session ended 2026-11-04 16:39',
 ])
 def test_known_hook_shapes_are_stubs(text):
     assert is_stub(text)

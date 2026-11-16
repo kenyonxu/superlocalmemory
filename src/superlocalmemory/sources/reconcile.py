@@ -28,8 +28,14 @@ from superlocalmemory.sources.ignore import IgnoreRules, kind_of
 from superlocalmemory.sources.roots import RootRefused, check_root
 from superlocalmemory.sources.safe_read import open_regular
 from superlocalmemory.sources.store import (
-    SourceStore, carried_entries, current_documents, entries_of, memory_entries, pending_documents,
-    replaced_documents, replaced_pictures,
+    SourceStore,
+    carried_entries,
+    current_documents,
+    entries_of,
+    memory_entries,
+    pending_documents,
+    replaced_documents,
+    replaced_pictures,
 )
 from superlocalmemory.sources.walk import Entry, WalkResult, stat_entry, walk_tree
 
@@ -387,7 +393,8 @@ def _work(p: _Pass, walked: WalkResult, progress: Callable[[int, int], None] | N
                 # (which supersedes the row) and any removal or purge also reach them.
                 kept = p.store.get_file(p.sid, e.relpath)
                 fields["entries"] = (entries_of(kept) if kept else []) + exc.entries
-            reason = "save_queued" if isinstance(exc, ingest.SaveBudgetSpent) else type(cause).__name__[:60]
+            reason = ("save_queued" if isinstance(exc, ingest.SaveBudgetSpent)
+                      else failure_reason(exc, cause))
             p.store.put_file(p.sid, e.relpath, state="error", reason=reason,
                              sha256=sha, **_stat_fields(e), **fields)
         if progress:
@@ -398,6 +405,22 @@ def _work(p: _Pass, walked: WalkResult, progress: Callable[[int, int], None] | N
     if not walked.capped:
         _tombstone_missing(p, seen, walked)
     p.stats.purged = retire.purge_due(p.host, p.store, p.runtime, p.source)
+
+
+def failure_reason(exc: BaseException, cause: BaseException) -> str:
+    """What the folder report says about a failed file: the error, its code, and the part.
+
+    Content-free by construction: an exception's type, a journal error code (a short machine
+    string such as ``COMMAND_REJECTED:ingest_gate:prompt_template``) and part numbers only.
+    """
+    reason = type(cause).__name__[:60]
+    code = getattr(cause, "error_code", "")
+    if isinstance(code, str) and code and code != reason:
+        reason += f":{code[:128]}"
+    part, total = getattr(exc, "part", 0), getattr(exc, "total", 0)
+    if isinstance(part, int) and part > 0:
+        reason += f" at part {part}/{total}" if isinstance(total, int) and total else f" at part {part}"
+    return reason
 
 
 def _known_device(source: dict) -> int | None:
@@ -460,7 +483,8 @@ def scan_source(host: SourceHost, store: SourceStore, source: dict[str, Any], *,
         root = check_root(source["root_path"])  # the rules for a new folder hold on every scan
     except RootRefused as exc:
         return _offline(store, source, stats, exc.code)
-    if os.path.normcase(str(root)) != os.path.normcase(source["root_path"]):  # the path now leads somewhere else than the folder confirmed
+    # the path now leads somewhere else than the folder confirmed
+    if os.path.normcase(str(root)) != os.path.normcase(source["root_path"]):
         return _offline(store, source, stats, "root_moved")
     rules = IgnoreRules(root, tuple(json.loads(source["include_types_json"])))
     try:

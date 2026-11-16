@@ -156,6 +156,9 @@ function setupFixture(tmp, overrides = {}) {
   writeFile(tmp, 'plugin-src/requirements.txt', 'superlocalmemory>=3.6.14\n');
   writeFile(tmp, 'plugin-src/rules/CLAUDE.md.fragment', '<!-- SLM -->\n');
   writeFile(tmp, 'assets/branding/slm-mark.svg', '<svg xmlns="http://www.w3.org/2000/svg"/>\n');
+  // Directory listing icon (binary PNG; copied byte for byte).
+  fs.mkdirSync(path.join(tmp, 'assets', 'branding'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'assets', 'branding', 'slm-mark.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]));
   // The plugin README and licence the Claude plugin directory requires (4.2.6).
   writeFile(tmp, 'plugin-src/docs/README.md', '# SuperLocalMemory plugin\n');
   writeFile(tmp, 'LICENSE', 'GNU AFFERO GENERAL PUBLIC LICENSE\n');
@@ -293,7 +296,15 @@ describe('buildPlan', () => {
     // (plus the Cursor-format pair: plugin/.cursor-plugin/plugin.json and the
     // repo-root .cursor-plugin/marketplace.json — tested in build-cursor-plugin.test.mjs)
     const isCursor = (k) => k.includes(`${path.sep}.cursor-plugin${path.sep}`);
-    const pluginJsonFiles = [...plan.keys()].filter(k => k.endsWith('plugin.json') && !isCursor(k));
+    // Other hosts' manifests sit at the plugin root (4.2.8): Agent Plugins
+    // plugin.json (Kiro, Codewhale, Copilot) and kimi.plugin.json (Kimi Code).
+    const pluginRoot = path.join(tmp, 'plugin');
+    const otherHosts = new Set([
+      path.join(pluginRoot, 'plugin.json'), path.join(pluginRoot, 'kimi.plugin.json'),
+    ]);
+    for (const p of otherHosts) assert.ok(plan.has(p), `missing host manifest ${p}`);
+    const pluginJsonFiles = [...plan.keys()].filter(
+      k => k.endsWith('plugin.json') && !isCursor(k) && !otherHosts.has(k));
     assert.equal(pluginJsonFiles.length, 1);
     assert.ok(pluginJsonFiles[0].includes(`plugin${path.sep}.claude-plugin`), 'plugin.json must be in plugin/.claude-plugin/');
 

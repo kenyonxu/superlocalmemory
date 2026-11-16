@@ -60,9 +60,9 @@ override) will not list or touch these files.  That is intentional.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
-import os
 import sqlite3
 import time
 from datetime import UTC, datetime
@@ -178,6 +178,54 @@ def _make_private_dir(path: Path) -> None:
         os.chmod(path, 0o700)
 
 
+def _quick_check(path: Path) -> list[str]:
+    """``PRAGMA quick_check`` findings for ``path``; empty when it is ok."""
+    verify = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = [str(r[0]) for r in verify.execute("PRAGMA quick_check").fetchall()]
+    finally:
+        verify.close()
+    return [] if rows == ["ok"] else rows
+
+
+def _rebuild_damaged_keyword_indexes(staging: Path, findings: list[str]) -> bool:
+    """Rebuild the copy's keyword indexes when they are the ONLY damage (#204).
+
+    A keyword index is derived from the stored facts, so a live store with a
+    damaged one still copies every memory faithfully -- and the copy reproduces
+    the damage, which failed the snapshot and with it every migration and the
+    daemon start. When each finding names a rebuildable index, the copy's
+    indexes are rebuilt from its own facts. Any other finding (a damaged page,
+    a broken B-tree) returns False and the snapshot is refused as before. The
+    live store is untouched; ``slm db repair`` still fixes it.
+    """
+    from superlocalmemory.storage.fts_residue import (
+        rebuild_keyword_index,
+        recreate_keyword_index,
+    )
+    from superlocalmemory.storage.integrity_diagnosis import damaged_indexes_in
+
+    if not all(damaged_indexes_in([f]) for f in findings):
+        return False
+    conn = sqlite3.connect(str(staging))
+    try:
+        for table in damaged_indexes_in(findings):
+            try:
+                rebuild_keyword_index(conn, table)
+            except sqlite3.DatabaseError:
+                recreate_keyword_index(conn, table)
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+    logger.warning(
+        "The store's keyword index is damaged (%s); the safety copy was taken "
+        "with it rebuilt. Fix the store itself with: slm db repair --apply",
+        ", ".join(damaged_indexes_in(findings)),
+    )
+    return True
+
+
 def _backup_via_sqlite_api(src: Path, dest: Path) -> None:
     """Copy a live SQLite database to dest using the SQLite backup API.
 
@@ -231,13 +279,13 @@ def _backup_via_sqlite_api(src: Path, dest: Path) -> None:
             os.fsync(fd)
         finally:
             os.close(fd)
-        verify = sqlite3.connect(f"file:{staging}?mode=ro", uri=True)
-        try:
-            if verify.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-                raise SnapshotUnusableError(
-                    f"snapshot failed its integrity check immediately after copy: {dest}")
-        finally:
-            verify.close()
+        findings = _quick_check(staging)
+        if findings and _rebuild_damaged_keyword_indexes(staging, findings):
+            findings = _quick_check(staging)
+        if findings:
+            raise SnapshotUnusableError(
+                f"snapshot failed its integrity check immediately after copy: {dest} "
+                f"({'; '.join(findings[:3])})")
     except Exception:
         staging.unlink(missing_ok=True)   # never leave a partial file behind
         raise
