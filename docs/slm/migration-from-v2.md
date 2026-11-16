@@ -25,7 +25,7 @@ Upgrade from SuperLocalMemory V2 to V3. Zero data loss, one command, rollback av
 1. **Update to the latest version:**
 
 ```bash
-npm update -g superlocalmemory
+npm update -g mslm-memory
 ```
 
 2. **Check your current version:**

@@ -8,7 +8,7 @@ SLM Optimize Proxy intercepts every LLM API call and applies three cost-reductio
 ## Prerequisites
 
 ```bash
-npm i -g superlocalmemory         # Primary npm global CLI
+npm i -g mslm-memory         # Primary npm global CLI
 
 # Python alternative: activate a virtual environment first, then:
 # python -m pip install --upgrade mslm-memory

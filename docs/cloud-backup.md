@@ -361,7 +361,7 @@ Check the destination status in **Settings** → **Cloud Backup**. Common causes
 
 ### Dashboard freezes during sync
 Syncs run in a background thread and should not block the dashboard. If one does,
-update SLM (`npm update -g superlocalmemory`, or inside the activated virtual
+update SLM (`npm update -g mslm-memory`, or inside the activated virtual
 environment `python -m pip install --upgrade mslm-memory`) and report it.
 
 ### The service will not start after a restore

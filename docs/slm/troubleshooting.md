@@ -40,7 +40,7 @@ source ~/.zshrc   # or source ~/.bashrc
 **Alternative — use npx:**
 
 ```bash
-npx superlocalmemory status
+npx -p mslm-memory slm status
 ```
 
 ### "Python not found" during setup
@@ -233,7 +233,7 @@ slm connect <your-ide>    # Regenerates the config
 4. **Test the MCP server directly:**
 
 ```bash
-npx superlocalmemory mcp --test
+npx -p mslm-memory slm mcp --test
 ```
 
 ### "Connection refused" in IDE

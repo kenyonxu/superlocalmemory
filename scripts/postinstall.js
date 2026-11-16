@@ -263,7 +263,7 @@ function pythonGuidance(platform = os.platform()) {
   } else {
     lines.push('Install it from https://www.python.org/downloads/');
   }
-  lines.push('Then finish the install:  npm rebuild -g superlocalmemory');
+  lines.push('Then finish the install:  npm rebuild -g mslm-memory');
   lines.push('(or set SLM_PYTHON to the interpreter if it is somewhere unusual).');
   lines.push('The npm installer creates a private virtual environment;');
   lines.push('it never installs packages into your system Python.');
@@ -284,13 +284,13 @@ function unsupportedMachine(platform, machine, is64, translated = false) {
         'This Node.js is running as an Intel program on an Apple Silicon Mac (translated by Rosetta),',
         'so the Python it starts reports Intel too. SuperLocalMemory needs everything to run natively.',
         'Install the Apple Silicon (arm64) Node.js (nodejs.org installer, or Homebrew in /opt/homebrew),',
-        'open a new terminal, and run Node natively, then: npm rebuild -g superlocalmemory',
+        'open a new terminal, and run Node natively, then: npm rebuild -g mslm-memory',
       ].join('\n');
     }
     return [
       'This Python is an Intel (x86_64) build, and SuperLocalMemory needs an Apple Silicon (arm64) one.',
       'On an Apple Silicon Mac, install the arm64 Python (Homebrew in /opt/homebrew: brew install python@3.13,',
-      'or the python.org installer run natively, not under Rosetta), then: npm rebuild -g superlocalmemory',
+      'or the python.org installer run natively, not under Rosetta), then: npm rebuild -g mslm-memory',
       'Intel Macs are not supported: the security library SuperLocalMemory pins has no Intel Mac build.',
     ].join('\n');
   }
@@ -300,11 +300,11 @@ function unsupportedMachine(platform, machine, is64, translated = false) {
   }
   if (platform === 'win32' && is64 === false) {
     return 'This Python is 32-bit. SuperLocalMemory needs 64-bit Python 3.12-3.14 on Windows '
-      + '(winget install Python.Python.3.13), then: npm rebuild -g superlocalmemory';
+      + '(winget install Python.Python.3.13), then: npm rebuild -g mslm-memory';
   }
   if (platform === 'linux' && (is64 === false || ['i386', 'i486', 'i586', 'i686', 'armv6l', 'armv7l'].includes(m))) {
     return 'This computer or this Python is 32-bit. SuperLocalMemory needs a 64-bit Linux '
-      + '(x86_64 or aarch64) with 64-bit Python 3.12-3.14, then: npm rebuild -g superlocalmemory';
+      + '(x86_64 or aarch64) with 64-bit Python 3.12-3.14, then: npm rebuild -g mslm-memory';
   }
   return null;
 }
@@ -364,7 +364,7 @@ function main(argv = process.argv.slice(2)) {
   if (!locationCheck.ok) {
     console.error(`SuperLocalMemory: refusing unsafe runtime location: ${locationCheck.error}.`);
     console.error('Move that path aside manually, verify it contains no needed files, then run:');
-    console.error('  npm rebuild -g superlocalmemory');
+    console.error('  npm rebuild -g mslm-memory');
     return 1;
   }
 
@@ -393,7 +393,7 @@ function main(argv = process.argv.slice(2)) {
     } else {
       console.error('Repair the selected Python installation so the stdlib venv module is available, then run:');
     }
-    console.error('  npm rebuild -g superlocalmemory');
+    console.error('  npm rebuild -g mslm-memory');
     return 1;
   }
 
@@ -445,7 +445,7 @@ function main(argv = process.argv.slice(2)) {
     console.error(`Tried Python source: ${packageSource}`);
     console.error('This install needs network access to PyPI (or set SLM_LOCAL_WHEEL=/path/to/superlocalmemory-<version>-py3-none-any.whl for air-gapped installs).');
     console.error('Check network access, available disk space, and Python build prerequisites, then run:');
-    console.error('  npm rebuild -g superlocalmemory');
+    console.error('  npm rebuild -g mslm-memory');
     console.error('No system Python packages or SLM durable data were modified.');
     return 1;
   }
@@ -472,7 +472,7 @@ function main(argv = process.argv.slice(2)) {
     console.error(
       `SuperLocalMemory: runtime identity check failed (npm=${packageVersion}, python=${installedVersion || 'unavailable'}).`,
     );
-    console.error('Run `npm rebuild -g superlocalmemory` to repair the package-owned runtime.');
+    console.error('Run `npm rebuild -g mslm-memory` to repair the package-owned runtime.');
     return 1;
   }
 

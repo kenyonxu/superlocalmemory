@@ -4,7 +4,7 @@
  * Licensed under AGPL-3.0-or-later - see LICENSE file
  *
  * Every repair command the installer prints for a global install is
- * `npm rebuild -g superlocalmemory`. Without -g npm rebuilds the project in the
+ * `npm rebuild -g mslm-memory`. Without -g npm rebuilds the project in the
  * current folder, so the printed command would do nothing for this package.
  *
  * Run with: node --test tests/postinstall/test_rebuild_command_is_global.js
@@ -32,7 +32,7 @@ test('postinstall.js never prints npm rebuild without -g', () => {
   const found = rebuildLines(POSTINSTALL);
   assert.ok(found.length >= 5, 'expected the installer to print the repair command in several places');
   for (const { text, line } of found) {
-    assert.match(text, /npm rebuild -g superlocalmemory/, `scripts/postinstall.js:${line}: ${text.trim()}`);
+    assert.match(text, /npm rebuild -g mslm-memory/, `scripts/postinstall.js:${line}: ${text.trim()}`);
   }
 });
 
@@ -40,7 +40,7 @@ test('bin/slm-npm never prints npm rebuild without -g', () => {
   const found = rebuildLines(WRAPPER);
   assert.ok(found.length >= 1);
   for (const { text, line } of found) {
-    assert.match(text, /npm rebuild -g superlocalmemory/, `bin/slm-npm:${line}: ${text.trim()}`);
+    assert.match(text, /npm rebuild -g mslm-memory/, `bin/slm-npm:${line}: ${text.trim()}`);
   }
 });
 
@@ -60,6 +60,6 @@ test('the wrapper, run with no runtime, tells a global install how to repair it'
   fs.copyFileSync(WRAPPER, path.join(dir, 'bin', 'slm-npm'));
   const result = spawnSync('node', [path.join(dir, 'bin', 'slm-npm')], { encoding: 'utf8', timeout: 15000 });
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /npm rebuild -g superlocalmemory/);
+  assert.match(result.stderr, /npm rebuild -g mslm-memory/);
   assert.doesNotMatch(result.stderr, /npm rebuild mslm-memory/);
 });

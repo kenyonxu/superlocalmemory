@@ -116,7 +116,7 @@ surface; this is not a guarantee against transport or provider failure.
 ### Step 1: Install
 
 ```bash
-npm i -g superlocalmemory
+npm i -g mslm-memory
 ```
 
 For the Python primary path, create and activate a virtual environment, then
@@ -223,7 +223,7 @@ See [optimize-cli.md](optimize-cli.md) for full CLI reference.
 
 Optimize is additive. It does not change the memory tools, hooks or file
 injection, and all of its data lives in a separate `llmcache.db`, so `memory.db`
-is untouched. To upgrade, `npm update -g superlocalmemory`, or inside an activated
+is untouched. To upgrade, `npm update -g mslm-memory`, or inside an activated
 virtual environment `python -m pip install --upgrade mslm-memory`, then
 `slm restart`.
 

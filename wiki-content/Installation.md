@@ -25,7 +25,7 @@ On Apple Silicon, setup also installs the on-device answer check (about 1.1 GB) 
 | Linux ARM64 (aarch64, with glibc: Debian, Ubuntu, Fedora) | Supported | Supported (16 GB RAM) |
 | Windows on ARM | Not supported | Not supported |
 
-The package metadata does not block an unsupported architecture, so an install on Intel Mac or 32-bit Windows fails later, where a pinned dependency has no build for it. The npm installer checks the Python it finds and says plainly when it cannot work (an Intel build on a Mac, 32-bit on Windows, Windows on ARM, 32-bit Linux, a Node running under Rosetta), with the repair command `npm rebuild -g superlocalmemory`.
+The package metadata does not block an unsupported architecture, so an install on Intel Mac or 32-bit Windows fails later, where a pinned dependency has no build for it. The npm installer checks the Python it finds and says plainly when it cannot work (an Intel build on a Mac, 32-bit on Windows, Windows on ARM, 32-bit Linux, a Node running under Rosetta), with the repair command `npm rebuild -g mslm-memory`.
 
 ## Install
 

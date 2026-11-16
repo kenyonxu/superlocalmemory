@@ -73,7 +73,7 @@ If the Connected apps page says the service is not available, run `slm status` t
 
 ## Installation and editor connections
 
-**`slm: command not found`.** The npm global bin folder is not on your PATH. Add `$(npm prefix -g)/bin` to it, or run `npx superlocalmemory status`. SLM needs Python 3.12 to 3.14 and Node 18 or later. For permission errors during an npm install, point npm's prefix at a folder you own, or install inside a Python virtual environment.
+**`slm: command not found`.** The npm global bin folder is not on your PATH. Add `$(npm prefix -g)/bin` to it, or run `npx -p mslm-memory slm status`. SLM needs Python 3.12 to 3.14 and Node 18 or later. For permission errors during an npm install, point npm's prefix at a folder you own, or install inside a Python virtual environment.
 
 **An editor does not show SLM tools.** Run `slm connect <editor>` to rewrite its MCP block, restart the editor completely rather than reloading the window, and run `slm doctor`. `slm connect --list` shows every target and where its config file would be; see [IDE Setup](IDE-Setup). Editors do not conflict with each other; they share one daemon, which is the single writer. For stale host assets after an upgrade, `slm upgrade-hosts` previews what would be refreshed ([Host Upgrades](Host-Upgrades)).
 

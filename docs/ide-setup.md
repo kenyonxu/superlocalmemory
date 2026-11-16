@@ -668,7 +668,7 @@ Then re-test with the curl command above.
 
 ```bash
 # Test the MCP server directly
-npx superlocalmemory mcp --test
+npx -p mslm-memory slm mcp --test
 
 # Check for port conflicts
 slm status --verbose

@@ -49,7 +49,7 @@ test('a Python that reports Intel only because Node runs translated is not calle
   assert.doesNotMatch(why, /This Python is an Intel/);
   assert.match(why, /Node/);
   assert.match(why, /natively/);
-  assert.match(why, /npm rebuild -g superlocalmemory/);
+  assert.match(why, /npm rebuild -g mslm-memory/);
 });
 
 test('nodeRunsTranslated reads sysctl.proc_translated on a Mac and nowhere else', () => {

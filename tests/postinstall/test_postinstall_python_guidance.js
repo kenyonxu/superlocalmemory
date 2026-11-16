@@ -5,7 +5,7 @@
  *
  * When no supported Python is found, the installer says how to get one on
  * this computer and the exact command that finishes a global install
- * (`npm rebuild -g superlocalmemory`; without -g npm looks in the current folder).
+ * (`npm rebuild -g mslm-memory`; without -g npm looks in the current folder).
  *
  * Run with: node --test tests/postinstall/test_postinstall_python_guidance.js
  */
@@ -20,20 +20,20 @@ test('macOS points at Homebrew and the python.org installer', () => {
   const text = pythonGuidance('darwin').join('\n');
   assert.match(text, /brew install python@3\.13/);
   assert.match(text, /python\.org/);
-  assert.match(text, /npm rebuild -g superlocalmemory/);
+  assert.match(text, /npm rebuild -g mslm-memory/);
 });
 
 test('Linux names the distro packages, including deadsnakes for older Ubuntu', () => {
   const text = pythonGuidance('linux').join('\n');
   assert.match(text, /deadsnakes/);
   assert.match(text, /python3\.12-venv/);
-  assert.match(text, /npm rebuild -g superlocalmemory/);
+  assert.match(text, /npm rebuild -g mslm-memory/);
 });
 
 test('Windows points at winget and the py launcher', () => {
   const text = pythonGuidance('win32').join('\n');
   assert.match(text, /winget install Python\.Python\.3\.13/);
-  assert.match(text, /npm rebuild -g superlocalmemory/);
+  assert.match(text, /npm rebuild -g mslm-memory/);
 });
 
 test('every platform says the system Python is never changed', () => {
@@ -48,7 +48,7 @@ test('an Intel Python on a Mac is refused in plain words before pip runs', () =>
   const why = unsupportedMachine('darwin', 'x86_64', true);
   assert.match(why, /Intel \(x86_64\)/);
   assert.match(why, /Apple Silicon/);
-  assert.match(why, /npm rebuild -g superlocalmemory/);
+  assert.match(why, /npm rebuild -g mslm-memory/);
 });
 
 test('a 32-bit Python on Windows is refused', () => {

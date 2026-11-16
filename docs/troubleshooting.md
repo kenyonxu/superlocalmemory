@@ -34,7 +34,7 @@ source ~/.zshrc   # or source ~/.bashrc
 **Alternative — use npx:**
 
 ```bash
-npx superlocalmemory status
+npx -p mslm-memory slm status
 ```
 
 **Installed with `uv tool install`?** The command lives in uv's tool bin
