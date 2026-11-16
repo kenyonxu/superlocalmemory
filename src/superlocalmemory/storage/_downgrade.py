@@ -83,9 +83,9 @@ def downgrade_target_release(target_schema: int, current: str) -> str | None:
 
 def downgrade_install_commands(version: str) -> list[str]:
     """The exact commands that install ``version`` over a newer one."""
-    return [f'pipx install --force "superlocalmemory=={version}"',
-            f"npm install -g superlocalmemory@{version}",
-            f'pip install "superlocalmemory=={version}"']
+    return [f'pipx install --force "mslm-memory=={version}"',
+            f"npm install -g mslm-memory@{version}",
+            f'pip install "mslm-memory=={version}"']
 
 
 def _ready_message(target_schema: int, version: str | None) -> str:

@@ -23,10 +23,13 @@ from pathlib import Path
 from typing import Callable
 
 
-PACKAGE_NAME = "superlocalmemory"
+PACKAGE_NAME = "mslm-memory"
+# Wheel and sdist filenames spell the distribution name with underscores
+# (PEP 427 / PEP 625): mslm-memory publishes mslm_memory-<version> files.
+PACKAGE_FILE_PREFIX = PACKAGE_NAME.replace("-", "_")
 PYPI_URL = "https://pypi.org/pypi/{name}/{version}/json"
 NPM_URL = "https://registry.npmjs.org/{name}/{version}"
-USER_AGENT = "superlocalmemory-release-guard/1"
+USER_AGENT = "mslm-memory-release-guard/1"
 
 
 @dataclass(frozen=True)
@@ -83,7 +86,7 @@ def _assert_pypi_identity(payload: dict, version: str, dist_dir: Path) -> None:
         path.name: _sha256(path)
         for path in sorted(dist_dir.iterdir())
         if path.is_file()
-        and path.name.startswith(f"{PACKAGE_NAME}-{version}")
+        and path.name.startswith(f"{PACKAGE_FILE_PREFIX}-{version}")
         and path.name.endswith((".whl", ".tar.gz"))
     }
     remote = {
@@ -91,7 +94,7 @@ def _assert_pypi_identity(payload: dict, version: str, dist_dir: Path) -> None:
         for item in payload.get("urls", [])
         if isinstance(item, dict)
         and isinstance(item.get("filename"), str)
-        and item["filename"].startswith(f"{PACKAGE_NAME}-{version}")
+        and item["filename"].startswith(f"{PACKAGE_FILE_PREFIX}-{version}")
         and item["filename"].endswith((".whl", ".tar.gz"))
     }
     if not local or local != remote:

@@ -136,8 +136,8 @@ def test_current_version_in_hero():
         "point at pre-3.6.14 releases (LLD AC3)."
     )
     hero = text[: text.index("\n## ")]
-    assert "img.shields.io/pypi/v/superlocalmemory" in hero
-    assert "img.shields.io/npm/v/superlocalmemory" in hero
+    assert "img.shields.io/pypi/v/mslm-memory" in hero
+    assert "img.shields.io/npm/v/mslm-memory" in hero
     assert _project_version() not in hero, (
         "The hero must not hard-code the release; the live badges show it (LLD AC3)."
     )

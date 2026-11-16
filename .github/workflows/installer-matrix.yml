@@ -145,13 +145,13 @@ jobs:
           test -f "$tarball"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
       - name: Build the Python wheel this npm candidate installs
-        # The npm installer fetches superlocalmemory==<version> from PyPI, which
+        # The npm installer fetches mslm-memory==<version> from PyPI, which
         # does not exist until the release publishes it. Install this commit's
         # wheel instead, so the check tests the code being released.
         shell: bash
         run: |
           python -m pip wheel --no-deps --disable-pip-version-check -w "$RUNNER_TEMP/slm-wheel" .
-          wheel="$(ls "$RUNNER_TEMP"/slm-wheel/superlocalmemory-*.whl)"
+          wheel="$(ls "$RUNNER_TEMP"/slm-wheel/mslm_memory-*.whl)"
           test -f "$wheel"
           echo "SLM_LOCAL_WHEEL=$wheel" >> "$GITHUB_ENV"
       - name: Install, invoke and uninstall npm candidate on Unix
@@ -162,7 +162,7 @@ jobs:
           test ! -e "$SLM_DATA_DIR"
           "$SLM_NPM_PREFIX/bin/slm" --version
           test ! -e "$SLM_DATA_DIR"
-          npm uninstall --global --prefix "$SLM_NPM_PREFIX" superlocalmemory
+          npm uninstall --global --prefix "$SLM_NPM_PREFIX" mslm-memory
           test ! -e "$SLM_NPM_PREFIX/bin/slm"
       - name: Install, invoke and uninstall npm candidate on Windows
         if: runner.os == 'Windows'
@@ -172,5 +172,5 @@ jobs:
           if (Test-Path -LiteralPath $env:SLM_DATA_DIR) { throw "npm installer created durable data" }
           & (Join-Path $env:SLM_NPM_PREFIX "slm.cmd") --version
           if (Test-Path -LiteralPath $env:SLM_DATA_DIR) { throw "Version probe created durable data" }
-          npm uninstall --global --prefix $env:SLM_NPM_PREFIX superlocalmemory
+          npm uninstall --global --prefix $env:SLM_NPM_PREFIX mslm-memory
           if (Test-Path -LiteralPath (Join-Path $env:SLM_NPM_PREFIX "slm.cmd")) { throw "npm CLI remained after uninstall" }

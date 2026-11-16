@@ -53,8 +53,8 @@ jobs:
         run: |
           set -uo pipefail
           V="${RELEASE_TAG#v}"
-          PYPI=$(curl -fsS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/superlocalmemory/$V/json" || true)
-          NPM=$(npm view "superlocalmemory@$V" version 2>/dev/null || true)
+          PYPI=$(curl -fsS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/mslm-memory/$V/json" || true)
+          NPM=$(npm view "mslm-memory@$V" version 2>/dev/null || true)
           if [ "$PYPI" = "200" ] || [ "$NPM" = "$V" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::$V is already on a registry; this recovery run skips the gate"
@@ -86,7 +86,7 @@ jobs:
     timeout-minutes: 45
     environment:
       name: pypi
-      url: https://pypi.org/project/superlocalmemory/
+      url: https://pypi.org/project/mslm-memory/
     permissions:
       contents: write
       id-token: write
@@ -170,8 +170,8 @@ jobs:
         run: |
           set -uo pipefail
           V="${{ steps.version.outputs.version }}"
-          PYPI=$(curl -fsS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/superlocalmemory/$V/json" || true)
-          NPM=$(npm view "superlocalmemory@$V" version 2>/dev/null || true)
+          PYPI=$(curl -fsS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/mslm-memory/$V/json" || true)
+          NPM=$(npm view "mslm-memory@$V" version 2>/dev/null || true)
           [ "$PYPI" = "200" ] && echo "pypi=true" >> "$GITHUB_OUTPUT"
           [ "$NPM" = "$V" ] && echo "npm=true" >> "$GITHUB_OUTPUT"
           if [ "$PYPI" = "200" ] && [ "$NPM" = "$V" ]; then
@@ -190,14 +190,14 @@ jobs:
           # Per registry: what is published is reused byte for byte, and only
           # what is missing is built (4.2.9: PyPI published, npm not).
           if [ "${{ steps.published.outputs.pypi }}" = "true" ]; then
-            curl -fsS "https://pypi.org/pypi/superlocalmemory/$V/json" \
+            curl -fsS "https://pypi.org/pypi/mslm-memory/$V/json" \
               | python3 -c 'import json,sys; [print(u["url"]) for u in json.load(sys.stdin)["urls"]]' \
               | while read -r url; do curl -fsSL -o "dist/python/$(basename "$url")" "$url"; done
           else
             uv build --out-dir dist/python
           fi
           if [ "${{ steps.published.outputs.npm }}" = "true" ]; then
-            (cd dist/npm && npm pack "superlocalmemory@$V")
+            (cd dist/npm && npm pack "mslm-memory@$V")
           else
             npm pack --pack-destination dist/npm
           fi
@@ -243,7 +243,7 @@ jobs:
 
       - name: Generate immutable release evidence
         run: |
-          SBOM="dist/superlocalmemory-${{ steps.version.outputs.version }}.cdx.json"
+          SBOM="dist/mslm_memory-${{ steps.version.outputs.version }}.cdx.json"
           python3 scripts/release_evidence.py sbom \
             --version "${{ steps.version.outputs.version }}" \
             --commit "$TAG_SHA" \
@@ -264,7 +264,7 @@ jobs:
       - name: Retain candidate artifacts and evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: superlocalmemory-${{ steps.version.outputs.version }}-candidates
+          name: mslm-memory-${{ steps.version.outputs.version }}-candidates
           path: |
             dist/python/*
             dist/npm/*
@@ -358,7 +358,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: superlocalmemory-${{ needs.release.outputs.version }}-vsix
+          name: mslm-memory-${{ needs.release.outputs.version }}-vsix
           path: dist/vscode/*.vsix
           if-no-files-found: error
           retention-days: 90
@@ -407,14 +407,14 @@ jobs:
         if: ${{ matrix.release_assets }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: superlocalmemory-${{ needs.release.outputs.version }}-candidates
+          name: mslm-memory-${{ needs.release.outputs.version }}-candidates
           path: dist
 
       - name: Download the VS Code extension
         if: ${{ matrix.vsix && needs.vsix.result == 'success' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: superlocalmemory-${{ needs.release.outputs.version }}-vsix
+          name: mslm-memory-${{ needs.release.outputs.version }}-vsix
           path: dist/vscode
 
       - name: Publish channel

@@ -63,7 +63,7 @@ slm_not_found_message() {
     _pbin="$(slm_plugin_bin)"
     printf '%s\n' "SLM plugin: no SuperLocalMemory found."
     printf '%s\n' "  Looked for: 'slm' on PATH, and ${_pbin:-a plugin venv (this host sets no plugin data dir)}."
-    printf '%s'   "  Install it with:  pipx install superlocalmemory"
+    printf '%s'   "  Install it with:  pipx install mslm-memory"
 }
 
 _slm_set_choice() {

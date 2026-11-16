@@ -141,4 +141,4 @@ def test_missing_slm_gives_a_clear_message(name, mcp_json, root, spawn, tmp_path
     assert result.returncode != 0
     assert result.stdout.strip() == "", "nothing may reach the MCP stdout"
     assert "slm is not on PATH" in result.stderr, result.stderr
-    assert "pipx install superlocalmemory" in result.stderr, result.stderr
+    assert "pipx install mslm-memory" in result.stderr, result.stderr

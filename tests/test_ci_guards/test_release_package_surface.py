@@ -149,9 +149,9 @@ def test_one_workflow_coordinates_both_registries_and_supports_recovery() -> Non
 def test_registry_guard_checks_both_immutable_package_versions(tmp_path: Path) -> None:
     pypi_dist = tmp_path / "python"
     pypi_dist.mkdir()
-    wheel = pypi_dist / "superlocalmemory-3.7.0-py3-none-any.whl"
+    wheel = pypi_dist / "mslm_memory-3.7.0-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
-    tarball = tmp_path / "superlocalmemory-3.7.0.tgz"
+    tarball = tmp_path / "mslm-memory-3.7.0.tgz"
     tarball.write_bytes(b"npm")
     checked: list[str] = []
 
@@ -175,18 +175,18 @@ def test_registry_guard_checks_both_immutable_package_versions(tmp_path: Path) -
 
     assert state == registry_guard.RegistryState(pypi_exists=True, npm_exists=False)
     assert len(checked) == 2
-    assert any("pypi.org/pypi/superlocalmemory/3.7.0/json" in url for url in checked)
-    assert any("registry.npmjs.org/superlocalmemory/3.7.0" in url for url in checked)
+    assert any("pypi.org/pypi/mslm-memory/3.7.0/json" in url for url in checked)
+    assert any("registry.npmjs.org/mslm-memory/3.7.0" in url for url in checked)
 
 
 def test_registry_guard_ignores_pypi_publisher_sidecars(tmp_path: Path) -> None:
     pypi_dist = tmp_path / "python"
     pypi_dist.mkdir()
-    wheel = pypi_dist / "superlocalmemory-3.7.0-py3-none-any.whl"
+    wheel = pypi_dist / "mslm_memory-3.7.0-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     (pypi_dist / ".gitignore").write_text("*\n", encoding="utf-8")
     (pypi_dist / f"{wheel.name}.publish.attestation").write_bytes(b"attestation")
-    tarball = tmp_path / "superlocalmemory-3.7.0.tgz"
+    tarball = tmp_path / "mslm-memory-3.7.0.tgz"
     tarball.write_bytes(b"npm")
 
     def fetcher(url: str) -> dict | None:

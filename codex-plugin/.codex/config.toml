@@ -14,7 +14,7 @@
 #
 # PREREQUISITE
 # ------------
-#   pip install superlocalmemory   (or: pipx install superlocalmemory)
+#   pip install mslm-memory   (or: pipx install mslm-memory)
 #   slm --version                  (confirm `slm` is on PATH)
 #
 # ADVANCED: venv-isolated launcher

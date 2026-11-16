@@ -280,7 +280,7 @@ class TestLaunchersPreferWhatIsAlreadyInstalled:
         )
 
         assert result.returncode != 0, f"{name}: started with nothing installed"
-        assert "pipx install superlocalmemory" in result.stderr, (
+        assert "pipx install mslm-memory" in result.stderr, (
             f"{name}: no install advice for a machine that has no SLM.\n"
             f"stderr={result.stderr[:300]!r}"
         )

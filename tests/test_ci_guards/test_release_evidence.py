@@ -21,9 +21,9 @@ from scripts.release_evidence import (
 
 def _candidate_files(root: Path) -> list[Path]:
     candidates = [
-        root / "python" / "superlocalmemory-3.7.0-py3-none-any.whl",
-        root / "python" / "superlocalmemory-3.7.0.tar.gz",
-        root / "npm" / "superlocalmemory-3.7.0.tgz",
+        root / "python" / "mslm_memory-3.7.0-py3-none-any.whl",
+        root / "python" / "mslm_memory-3.7.0.tar.gz",
+        root / "npm" / "mslm-memory-3.7.0.tgz",
     ]
     for index, path in enumerate(candidates):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,7 +83,7 @@ def test_lock_derived_sbom_inventories_python_and_npm_dependencies(tmp_path: Pat
     uv_lock.write_text(
         'version = 1\nrevision = 1\nrequires-python = ">=3.11"\n'
         '[[package]]\nname = "httpx"\nversion = "0.28.1"\n'
-        '[[package]]\nname = "superlocalmemory"\nversion = "3.7.0"\n',
+        '[[package]]\nname = "mslm-memory"\nversion = "3.7.0"\n',
         encoding="utf-8",
     )
     package_lock = tmp_path / "package-lock.json"
@@ -91,7 +91,7 @@ def test_lock_derived_sbom_inventories_python_and_npm_dependencies(tmp_path: Pat
         json.dumps(
             {
                 "packages": {
-                    "": {"name": "superlocalmemory", "version": "3.7.0"},
+                    "": {"name": "mslm-memory", "version": "3.7.0"},
                     "node_modules/docx": {"version": "9.5.1"},
                 }
             }
@@ -112,14 +112,16 @@ def test_lock_derived_sbom_inventories_python_and_npm_dependencies(tmp_path: Pat
     purls = {component["purl"] for component in sbom["components"]}
     assert "pkg:pypi/httpx@0.28.1" in purls
     assert "pkg:npm/docx@9.5.1" in purls
+    # The released package itself is metadata, not a dependency component.
+    assert "pkg:pypi/mslm-memory@3.7.0" not in purls
 
 
 def test_npm_candidate_verifier_reads_the_exact_tarball(tmp_path: Path) -> None:
-    tarball = tmp_path / "superlocalmemory-3.7.0.tgz"
+    tarball = tmp_path / "mslm-memory-3.7.0.tgz"
     members = {
         "package/package.json": json.dumps(
             {
-                "name": "superlocalmemory",
+                "name": "mslm-memory",
                 "version": "3.7.0",
                 "license": "AGPL-3.0-or-later",
                 "bin": {"slm": "bin/slm-npm"},
@@ -140,11 +142,11 @@ def test_npm_candidate_verifier_reads_the_exact_tarball(tmp_path: Path) -> None:
 
 def test_npm_candidate_verifier_rejects_bundled_python(tmp_path: Path) -> None:
     """4.1.14 single-source: a package/src tree fails the gate."""
-    tarball = tmp_path / "superlocalmemory-3.7.0.tgz"
+    tarball = tmp_path / "mslm-memory-3.7.0.tgz"
     members = {
         "package/package.json": json.dumps(
             {
-                "name": "superlocalmemory",
+                "name": "mslm-memory",
                 "version": "3.7.0",
                 "license": "AGPL-3.0-or-later",
                 "bin": {"slm": "bin/slm-npm"},
@@ -170,7 +172,7 @@ def test_npm_candidate_verifier_rejects_version_drift(tmp_path: Path) -> None:
     tarball = tmp_path / "candidate.tgz"
     payload = json.dumps(
         {
-            "name": "superlocalmemory",
+            "name": "mslm-memory",
             "version": "3.6.23",
             "license": "AGPL-3.0-or-later",
             "bin": {"slm": "bin/slm-npm"},
@@ -194,29 +196,29 @@ def _write_python_artifacts(
     npm_version: str = "3.8.11",
     wheel_version: str = "3.8.11",
 ) -> tuple[Path, Path, Path]:
-    wheel = root / "superlocalmemory-3.8.11-py3-none-any.whl"
-    sdist = root / "superlocalmemory-3.8.11.tar.gz"
-    npm = root / "superlocalmemory-3.8.11.tgz"
+    wheel = root / "mslm_memory-3.8.11-py3-none-any.whl"
+    sdist = root / "mslm_memory-3.8.11.tar.gz"
+    npm = root / "mslm-memory-3.8.11.tgz"
     root.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(wheel, "w") as archive:
         for path, payload in wheel_sources.items():
             archive.writestr(f"superlocalmemory/{path}", payload)
         archive.writestr(
-            "superlocalmemory-3.8.11.dist-info/METADATA",
-            f"Metadata-Version: 2.1\nName: superlocalmemory\nVersion: {wheel_version}\n",
+            "mslm_memory-3.8.11.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: mslm-memory\nVersion: {wheel_version}\n",
         )
     with tarfile.open(sdist, "w:gz") as archive:
         for path, payload in sdist_sources.items():
             info = tarfile.TarInfo(
-                f"superlocalmemory-3.8.11/src/superlocalmemory/{path}"
+                f"mslm_memory-3.8.11/src/superlocalmemory/{path}"
             )
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
     with tarfile.open(npm, "w:gz") as archive:
         payload = json.dumps(
             {
-                "name": "superlocalmemory",
+                "name": "mslm-memory",
                 "version": npm_version,
                 "license": "AGPL-3.0-or-later",
                 "bin": {"slm": "bin/slm-npm"},

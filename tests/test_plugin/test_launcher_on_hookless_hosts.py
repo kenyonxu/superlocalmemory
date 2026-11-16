@@ -158,7 +158,7 @@ def test_nothing_to_run_says_how_to_fix_it_and_builds_nothing(tmp_path) -> None:
     _logging_stub(stubs / "python3", "python3", log)
     result = _run(tmp_path, stubs, LITERAL_HOST_ENV)
     assert result.returncode == 1
-    assert "pipx install superlocalmemory" in result.stderr
+    assert "pipx install mslm-memory" in result.stderr
     # uv named, not linked: a remote URL beside TOKENIZERS_PARALLELISM in this
     # script is held by the Claude plugin directory as a credential leaving.
     assert "install uv" in result.stderr.lower()

@@ -213,8 +213,8 @@ def install_method_finding() -> tuple[str, str, str]:
             f"SLM runs on the system Python ({sys.executable}), which is externally "
             "managed (EXTERNALLY-MANAGED marker found); pip install may fail with a "
             "PEP 668 error.",
-            "Use an isolated install: pipx install superlocalmemory  "
-            "or uv tool install superlocalmemory",
+            "Use an isolated install: pipx install mslm-memory  "
+            "or uv tool install mslm-memory",
         )
     return ("PASS", "No EXTERNALLY-MANAGED marker — standard pip install supported", "")
 
@@ -240,7 +240,7 @@ def sqlite_extension_finding() -> tuple[str, str, str]:
                 "recall falls back to keyword and graph channels only.",
                 "Run SLM on a Python built with extension loading (Homebrew, "
                 "python.org or uv-managed), e.g. uv tool install --python 3.12 "
-                "superlocalmemory, then slm restart",
+                "mslm-memory, then slm restart",
             )
         try:
             import sqlite_vec

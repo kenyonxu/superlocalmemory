@@ -133,4 +133,4 @@ def test_posix_declared_entry_explains_a_missing_slm(name, mcp_json, root, tmp_p
     (tmp_path / "bin").mkdir()
     result = _run_declared(mcp_json, root, tmp_path / "bin", tmp_path)
     assert result.returncode != 0
-    assert "pipx install superlocalmemory" in result.stderr, result.stderr[:400]
+    assert "pipx install mslm-memory" in result.stderr, result.stderr[:400]

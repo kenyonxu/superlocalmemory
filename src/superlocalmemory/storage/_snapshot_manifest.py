@@ -48,7 +48,7 @@ def package_version() -> str:
     try:
         from importlib.metadata import version
 
-        return version("superlocalmemory")
+        return version("mslm-memory")
     except Exception:  # noqa: BLE001 - a missing dist-info is not an error here
         return "unknown"
 

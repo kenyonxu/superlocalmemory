@@ -11,7 +11,7 @@
 # Difference from plugin/scripts/slm-launch (Claude Code edition):
 #   - Uses SLM_DATA_DIR (default: ~/.superlocalmemory) instead of CLAUDE_PLUGIN_DATA.
 #   - Falls back to the PATH `slm` binary if the venv binary is not present.
-#     This means a global `pip install superlocalmemory` works without a venv.
+#     This means a global `pip install mslm-memory` works without a venv.
 #
 # Environment:
 #   SLM_DATA_DIR — persistent data dir where venv lives
@@ -43,7 +43,7 @@ elif [ -x "${_VENV_BIN}" ]; then
     SLM_BIN="${_VENV_BIN}"
 else
     echo "SLM: no SuperLocalMemory found — looked for 'slm' on PATH and ${_VENV_BIN}." >&2
-    echo "  Install it with:  pipx install superlocalmemory" >&2
+    echo "  Install it with:  pipx install mslm-memory" >&2
     exit 1
 fi
 

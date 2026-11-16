@@ -78,7 +78,7 @@ def build_cyclonedx_sbom(
     for package in python_lock.get("package", []):
         name = str(package.get("name", ""))
         dependency_version = str(package.get("version", ""))
-        if not name or not dependency_version or name == "superlocalmemory":
+        if not name or not dependency_version or name == "mslm-memory":
             continue
         component = _component(
             ecosystem="pypi", name=name, version=dependency_version
@@ -110,10 +110,10 @@ def build_cyclonedx_sbom(
             "timestamp": generated_at or _utc_now(),
             "component": {
                 "type": "application",
-                "bom-ref": f"pkg:pypi/superlocalmemory@{version}",
-                "name": "superlocalmemory",
+                "bom-ref": f"pkg:pypi/mslm-memory@{version}",
+                "name": "mslm-memory",
                 "version": version,
-                "purl": f"pkg:pypi/superlocalmemory@{version}",
+                "purl": f"pkg:pypi/mslm-memory@{version}",
                 "properties": [
                     {"name": "qualixar:git-commit", "value": commit},
                 ],
@@ -171,7 +171,7 @@ def verify_npm_tarball(tarball: Path, expected_version: str) -> list[str]:
     except (OSError, tarfile.TarError, KeyError, json.JSONDecodeError) as exc:
         return [f"invalid npm tarball: {exc}"]
 
-    if package.get("name") != "superlocalmemory":
+    if package.get("name") != "mslm-memory":
         errors.append(f"npm package name mismatch: {package.get('name')!r}")
     if package.get("version") != expected_version:
         errors.append(

@@ -12,10 +12,10 @@
 
 **One memory for every agent you and your team use** — Claude Code, Codex, Cursor, Copilot, Antigravity, Hermes, ChatGPT, Claude on the web, Grok Bot, Muse and any harness that speaks MCP or runs a command. Decisions, documents, screenshots and PDFs, recalled the way you ask for them, governed like company data, shared through a mesh where your local agents and web bots talk to each other, and answered honestly: when the answer isn't there, your agent hears *"That isn't in SuperLocalMemory."* — not a confident guess.
 
-[![PyPI](https://img.shields.io/pypi/v/superlocalmemory)](https://pypi.org/project/superlocalmemory/)
-[![npm](https://img.shields.io/npm/v/superlocalmemory)](https://www.npmjs.com/package/superlocalmemory)
-[![PyPI downloads](https://img.shields.io/pepy/dt/superlocalmemory?label=PyPI%20downloads)](https://pepy.tech/project/superlocalmemory)
-[![npm downloads](https://img.shields.io/npm/dt/superlocalmemory?label=npm%20downloads)](https://www.npmjs.com/package/superlocalmemory)
+[![PyPI](https://img.shields.io/pypi/v/mslm-memory)](https://pypi.org/project/mslm-memory/)
+[![npm](https://img.shields.io/npm/v/mslm-memory)](https://www.npmjs.com/package/mslm-memory)
+[![PyPI downloads](https://img.shields.io/pepy/dt/mslm-memory?label=PyPI%20downloads)](https://pepy.tech/project/mslm-memory)
+[![npm downloads](https://img.shields.io/npm/dt/mslm-memory?label=npm%20downloads)](https://www.npmjs.com/package/mslm-memory)
 [![GitHub stars](https://img.shields.io/github/stars/qualixar/superlocalmemory?style=flat&logo=github)](https://github.com/qualixar/superlocalmemory/stargazers)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](https://github.com/qualixar/superlocalmemory/blob/main/LICENSE)
 [![Research: 4 arXiv papers](https://img.shields.io/badge/arXiv-4_papers-b31b1b)](#research)
@@ -166,10 +166,10 @@ You do not need to wait for an app store. Every app below can take SuperLocalMem
 | **Cursor** (editor and Agents window) | Run `slm connect cursor`, then restart Cursor |
 | **VS Code** (Copilot chat in the editor) | Install the SuperLocalMemory extension (`.vsix` from the [latest release](https://github.com/qualixar/superlocalmemory/releases/latest): Extensions → `...` → Install from VSIX) |
 | **VS Code Agents window, GitHub Copilot CLI** | Run `slm connect copilot-cli`; for the skills, add `qualixar/superlocalmemory` in the Agents window's Plugins screen |
-| **Antigravity** | Run `agy plugin install "$(npm root -g)/superlocalmemory/antigravity-plugin"` |
+| **Antigravity** | Run `agy plugin install "$(npm root -g)/mslm-memory/antigravity-plugin"` |
 | **Grok CLI** | Run `grok plugin install 'qualixar/superlocalmemory#plugin'` |
 | **Grok Bot** | In Grok's Plugins screen, add the marketplace `qualixar/superlocalmemory` and add `superlocalmemory` |
-| **Muse CLI** | Run `slm connect muse`, then `muse plugins install "$(npm root -g)/superlocalmemory/muse-plugin"` and `muse plugins approve superlocalmemory` |
+| **Muse CLI** | Run `slm connect muse`, then `muse plugins install "$(npm root -g)/mslm-memory/muse-plugin"` and `muse plugins approve superlocalmemory` |
 | **Hermes** (terminal and desktop app) | Run `hermes plugins install 'https://github.com/qualixar/superlocalmemory.git#hermes-plugin'`, then `slm upgrade-hosts --host hermes --apply` |
 | **OpenClaw** | Run `slm connect openclaw` |
 | **Windsurf, Zed, JetBrains, Gemini CLI, OpenCode, Continue** | Run `slm connect <app>`, for example `slm connect windsurf` |

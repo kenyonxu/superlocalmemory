@@ -84,9 +84,9 @@ def test_message_names_the_version_and_the_exact_install_command(store, monkeypa
                                   learning_db=learning_db)
 
     assert "Ready to go back to 4.1.19" in report.message
-    assert 'pipx install --force "superlocalmemory==4.1.19"' in report.message
-    assert "npm install -g superlocalmemory@4.1.19" in report.message
+    assert 'pipx install --force "mslm-memory==4.1.19"' in report.message
+    assert "npm install -g mslm-memory@4.1.19" in report.message
     assert "any version from 4.1.18 on" in report.message
     data = report.as_dict()
     assert data["target_version"] == "4.1.19"
-    assert 'pip install "superlocalmemory==4.1.19"' in data["install_commands"]
+    assert 'pip install "mslm-memory==4.1.19"' in data["install_commands"]
